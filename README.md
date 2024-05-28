@@ -1,6 +1,9 @@
 # flatgeom
 
-Geometry primitives employing flat data structures instead of jagged arrays to represent Polygons, MultiPolygons, and other geometries. This design may be efficient for serialization and deserialization.
+[![Test](https://github.com/MIERUNE/flatgeom-rs/actions/workflows/Test.yml/badge.svg)](https://github.com/MIERUNE/flatgeom-rs/actions/workflows/Test.yml)
+[![codecov](https://codecov.io/gh/MIERUNE/flatgeom-rs/graph/badge.svg?token=iFJds9bJoo)](https://codecov.io/gh/MIERUNE/flatgeom-rs)
+
+Geospatial geometry primitives employing flat data structures instead of jagged arrays to represent Polygons, MultiPolygons, and other geometries. This design may be efficient for serialization and deserialization.
 
 ## Visual examples of the data structure
 
