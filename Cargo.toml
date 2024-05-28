@@ -1,0 +1,20 @@
+[package]
+name = "flatgeom"
+version = "0.0.1"
+edition = "2021"
+description = "Geometry types using flat structures instead of jagged arrays"
+repository = "https://github.com/MIERUNE/flatgeom-rs"
+authors = ["MIERUNE Inc. <info@mierune.co.jp>"]
+categories = ["graphics", "science", "no-std"]
+
+[dependencies]
+num-traits = "0.2.19"
+serde = { version = "1.0.203", features = ["derive"], optional = true }
+
+[dev-dependencies]
+geo-types = "0.7"
+geojson = "0.24"
+indexmap = "2.2"
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
