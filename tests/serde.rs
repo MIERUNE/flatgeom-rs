@@ -1,6 +1,6 @@
 #[cfg(feature = "serde")]
 mod tests {
-    use nusamai_geometry::{
+    use flatgeom::{
         Geometry2, LineString3, MultiLineString2, MultiPoint3, MultiPolygon2, Polygon2,
     };
 
