@@ -1,8 +1,6 @@
 # flatgeom
 
-A geometry type library using flat structures instead of jagged arrays to represent Polygon, MultiPolygon, etc.
-
-It is useful, for example, when serialization/deserialization performance is important.
+Geometry primitives employing flat data structures instead of jagged arrays to represent Polygons, MultiPolygons, and other geometries. This design may be efficient for serialization and deserialization.
 
 ## Visual examples of the data structure
 

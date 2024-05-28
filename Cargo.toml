@@ -5,6 +5,7 @@ edition = "2021"
 description = "Geometry types using flat structures instead of jagged arrays"
 repository = "https://github.com/MIERUNE/flatgeom-rs"
 authors = ["MIERUNE Inc. <info@mierune.co.jp>"]
+license = "MIT"
 categories = ["graphics", "science", "no-std"]
 
 [dependencies]
