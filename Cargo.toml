@@ -1,6 +1,6 @@
 [package]
 name = "flatgeom"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 description = "Geometry types using flat structures instead of jagged arrays"
 repository = "https://github.com/MIERUNE/flatgeom-rs"
