@@ -8,7 +8,11 @@ authors = ["MIERUNE Inc. <info@mierune.co.jp>"]
 license = "MIT"
 categories = ["graphics", "science", "no-std"]
 
+[features]
+default = ["geozero"]
+
 [dependencies]
+geozero = { version = "0.13.0", default-features = false, optional = true }
 num-traits = "0.2.19"
 serde = { version = "1.0.203", features = ["derive"], optional = true }
 
@@ -19,3 +23,4 @@ indexmap = "2.2"
 thiserror = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+geozero = "0.13.0"

@@ -46,11 +46,15 @@ impl<N: CoordNum> Coord2d for [N; 2] {
 )]
 #[derive(Debug, Clone)]
 pub enum Geometry<'a, T: Coord> {
+    // Point?
     MultiPoint(MultiPoint<'a, T>),
+    // Line?
     LineString(LineString<'a, T>),
     MultiLineString(MultiLineString<'a, T>),
     Polygon(Polygon<'a, T>),
     MultiPolygon(MultiPolygon<'a, T>),
+    // Triangle?
+    // TIN?
 }
 
 pub type Geometry2<'a, C = f64> = Geometry<'a, [C; 2]>;

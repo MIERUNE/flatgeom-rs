@@ -56,6 +56,15 @@ impl<'a, T: Coord> Polygon<'a, T> {
         self.hole_indices.as_ref()
     }
 
+    /// Returns the number of rings (including the exterior ring)
+    pub fn len(&self) -> usize {
+        self.hole_indices.len() + 1
+    }
+
+    pub fn is_empty(&self) -> bool {
+        false
+    }
+
     /// Returns the exterior ring of the polygon.
     pub fn exterior(&self) -> LineString<T> {
         LineString::from_raw(if self.hole_indices.is_empty() {
