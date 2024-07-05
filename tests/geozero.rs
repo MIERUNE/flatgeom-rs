@@ -313,3 +313,32 @@ fn geometry3d() {
         _ => panic!("MultiPoint is expected"),
     }
 }
+
+#[test]
+fn geometry_collection() {
+    let mut mp = MultiPoint2::new();
+    mp.extend([[0., 0.], [5., 0.], [5., 5.], [0., 5.]]);
+    let geomcoll = crate::Geometry2::GeometryCollection(vec![crate::Geometry2::MultiPoint(mp)]);
+
+    // Conversion
+    let Ok(geo) = geomcoll.to_geo() else {
+        panic!("Conversion failed");
+    };
+    match &geo {
+        geo_types::Geometry::GeometryCollection(geo_geomcoll) => {
+            assert_eq!(geo_geomcoll.len(), 1);
+        }
+        _ => panic!("Geometry type must be GeometryCollection"),
+    }
+
+    // Inversion
+    let Ok(flat): geozero::error::Result<Geometry3> = geo.to_flatgeom() else {
+        panic!("Conversion failed");
+    };
+    match &flat {
+        flatgeom::Geometry::GeometryCollection(mp) => {
+            assert_eq!(mp.len(), 1);
+        }
+        _ => panic!("GeometryCollection is expected"),
+    }
+}

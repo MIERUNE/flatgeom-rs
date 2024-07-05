@@ -123,6 +123,10 @@ impl<const D: usize> GeomProcessor for FlatgeomWriter<D> {
     }
 
     fn geometrycollection_end(&mut self, _idx: usize) -> Result<()> {
+        let Some(collection) = self.collections.pop() else {
+            panic!("collection stack underflow");
+        };
+        self.current = Some(Geometry::GeometryCollection(collection));
         self.finish_geometry();
         Ok(())
     }
