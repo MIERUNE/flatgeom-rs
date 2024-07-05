@@ -63,6 +63,11 @@ impl<'a, T: Coord> LineString<'a, T> {
         self.coords.to_mut().push(coord);
     }
 
+    /// Extends the LineString with coordinates.
+    pub fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        self.coords.to_mut().extend(iter);
+    }
+
     /// Removes all points from the LineString.
     pub fn clear(&mut self) {
         self.coords.to_mut().clear();

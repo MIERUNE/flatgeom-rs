@@ -69,6 +69,11 @@ impl<'a, T: Coord> MultiPoint<'a, T> {
         self.coords.to_mut().push(coord);
     }
 
+    /// Extends the MultiPoint with coordinates.
+    pub fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        self.coords.to_mut().extend(iter);
+    }
+
     /// Removes all points from the LineString.
     pub fn clear(&mut self) {
         self.coords.to_mut().clear();

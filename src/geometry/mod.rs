@@ -1,3 +1,5 @@
+use alloc::vec::Vec;
+
 mod linestring;
 mod multi_linestring;
 mod multi_point;
@@ -55,6 +57,7 @@ pub enum Geometry<'a, T: Coord> {
     MultiPolygon(MultiPolygon<'a, T>),
     // Triangle?
     // TIN?
+    GeometryCollection(Vec<Geometry<'a, T>>),
 }
 
 pub type Geometry2<'a, C = f64> = Geometry<'a, [C; 2]>;

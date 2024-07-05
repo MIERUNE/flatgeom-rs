@@ -3,6 +3,6 @@
 extern crate alloc;
 
 mod geometry;
-mod geozero;
+pub mod geozero;
 
 pub use geometry::*;
