@@ -318,7 +318,13 @@ fn geometry3d() {
 fn geometry_collection() {
     let mut mp = MultiPoint2::new();
     mp.extend([[0., 0.], [5., 0.], [5., 5.], [0., 5.]]);
-    let geomcoll = crate::Geometry2::GeometryCollection(vec![crate::Geometry2::MultiPoint(mp)]);
+
+    let ls = LineString2::from_raw(vec![[0., 0.], [5., 0.], [5., 5.], [0., 5.]].into());
+
+    let geomcoll = crate::Geometry2::GeometryCollection(vec![
+        crate::Geometry2::MultiPoint(mp),
+        crate::Geometry2::LineString(ls),
+    ]);
 
     // Conversion
     let Ok(geo) = geomcoll.to_geo() else {
@@ -326,7 +332,7 @@ fn geometry_collection() {
     };
     match &geo {
         geo_types::Geometry::GeometryCollection(geo_geomcoll) => {
-            assert_eq!(geo_geomcoll.len(), 1);
+            assert_eq!(geo_geomcoll.len(), 2);
         }
         _ => panic!("Geometry type must be GeometryCollection"),
     }
@@ -337,7 +343,7 @@ fn geometry_collection() {
     };
     match &flat {
         flatgeom::Geometry::GeometryCollection(mp) => {
-            assert_eq!(mp.len(), 1);
+            assert_eq!(mp.len(), 2);
         }
         _ => panic!("GeometryCollection is expected"),
     }
