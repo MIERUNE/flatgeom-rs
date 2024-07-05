@@ -3,6 +3,8 @@
 extern crate alloc;
 
 mod geometry;
-mod geozero;
+
+#[cfg(feature = "geozero")]
+pub mod geozero;
 
 pub use geometry::*;

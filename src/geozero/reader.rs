@@ -4,13 +4,29 @@ use geozero::{GeomProcessor, GeozeroGeometry};
 
 impl<const D: usize> GeozeroGeometry for Geometry<'_, [f64; D]> {
     fn process_geom<P: GeomProcessor>(&self, processor: &mut P) -> geozero::error::Result<()> {
-        match self {
-            Geometry::MultiPoint(geom) => geom.process_geom(processor),
-            Geometry::LineString(geom) => geom.process_geom(processor),
-            Geometry::MultiLineString(geom) => geom.process_geom(processor),
-            Geometry::Polygon(geom) => geom.process_geom(processor),
-            Geometry::MultiPolygon(geom) => geom.process_geom(processor),
+        process_geometry(self, processor, 0)
+    }
+}
+
+fn process_geometry<const D: usize, P: geozero::GeomProcessor>(
+    geom: &Geometry<'_, [f64; D]>,
+    processor: &mut P,
+    idx: usize,
+) -> Result<(), geozero::error::GeozeroError> {
+    match geom {
+        Geometry::GeometryCollection(geoms) => {
+            processor.geometrycollection_begin(geoms.len(), idx)?;
+            for (geom_idx, geom) in geoms.iter().enumerate() {
+                process_geometry(geom, processor, geom_idx)?; // FIXME: idx
+            }
+            processor.geometrycollection_end(idx)?;
+            Ok(())
         }
+        Geometry::MultiPoint(geom) => process_multipoint(geom, processor, idx),
+        Geometry::LineString(geom) => process_linestring(geom, processor, idx),
+        Geometry::MultiLineString(geom) => process_multilinestring(geom, processor, idx),
+        Geometry::Polygon(geom) => process_polygon(geom, processor, idx),
+        Geometry::MultiPolygon(geom) => process_multipolygon(geom, processor, idx),
     }
 }
 
@@ -19,18 +35,33 @@ impl<const D: usize> geozero::GeozeroGeometry for MultiPoint<'_, [f64; D]> {
         &self,
         processor: &mut P,
     ) -> geozero::error::Result<()> {
-        let idx = 0;
-        processor.multipoint_begin(self.len(), idx)?;
-        for point in self.iter() {
-            if processor.multi_dim() && D >= 3 {
-                processor.coordinate(point[0], point[1], Some(point[2]), None, None, None, idx)?;
-            } else {
-                processor.xy(point[0], point[1], idx)?;
-            }
-        }
-        processor.multipoint_end(idx)?;
-        Ok(())
+        process_multipoint(self, processor, 0)
     }
+}
+
+fn process_multipoint<const D: usize, P: geozero::GeomProcessor>(
+    geom: &MultiPoint<'_, [f64; D]>,
+    processor: &mut P,
+    idx: usize,
+) -> Result<(), geozero::error::GeozeroError> {
+    processor.multipoint_begin(geom.len(), idx)?;
+    for (coord_idx, coord) in geom.iter().enumerate() {
+        if processor.multi_dim() && D >= 3 {
+            processor.coordinate(
+                coord[0],
+                coord[1],
+                Some(coord[2]),
+                None,
+                None,
+                None,
+                coord_idx,
+            )?;
+        } else {
+            processor.xy(coord[0], coord[1], coord_idx)?;
+        }
+    }
+    processor.multipoint_end(idx)?;
+    Ok(())
 }
 
 impl<const D: usize> geozero::GeozeroGeometry for LineString<'_, [f64; D]> {
@@ -38,18 +69,33 @@ impl<const D: usize> geozero::GeozeroGeometry for LineString<'_, [f64; D]> {
         &self,
         processor: &mut P,
     ) -> geozero::error::Result<()> {
-        let idx = 0;
-        processor.linestring_begin(true, self.len(), idx)?;
-        for point in self.iter() {
-            if processor.multi_dim() && D >= 3 {
-                processor.coordinate(point[0], point[1], Some(point[2]), None, None, None, idx)?;
-            } else {
-                processor.xy(point[0], point[1], idx)?;
-            }
-        }
-        processor.linestring_end(true, idx)?;
-        Ok(())
+        process_linestring(self, processor, 0)
     }
+}
+
+fn process_linestring<const D: usize, P: geozero::GeomProcessor>(
+    geom: &LineString<'_, [f64; D]>,
+    processor: &mut P,
+    idx: usize,
+) -> Result<(), geozero::error::GeozeroError> {
+    processor.linestring_begin(true, geom.len(), idx)?;
+    for (coord_idx, coord) in geom.iter().enumerate() {
+        if processor.multi_dim() && D >= 3 {
+            processor.coordinate(
+                coord[0],
+                coord[1],
+                Some(coord[2]),
+                None,
+                None,
+                None,
+                coord_idx,
+            )?;
+        } else {
+            processor.xy(coord[0], coord[1], coord_idx)?;
+        }
+    }
+    processor.linestring_end(true, idx)?;
+    Ok(())
 }
 
 impl<const D: usize> geozero::GeozeroGeometry for MultiLineString<'_, [f64; D]> {
@@ -57,30 +103,37 @@ impl<const D: usize> geozero::GeozeroGeometry for MultiLineString<'_, [f64; D]> 
         &self,
         processor: &mut P,
     ) -> geozero::error::Result<()> {
-        let idx = 0;
-        processor.multilinestring_begin(self.len(), idx)?;
-        for ls in self {
-            processor.linestring_begin(false, ls.len(), idx)?;
-            for point in &ls {
-                if processor.multi_dim() && D >= 3 {
-                    processor.coordinate(
-                        point[0],
-                        point[1],
-                        Some(point[2]),
-                        None,
-                        None,
-                        None,
-                        idx,
-                    )?;
-                } else {
-                    processor.xy(point[0], point[1], idx)?;
-                }
-            }
-            processor.linestring_end(false, idx)?;
-        }
-        processor.multilinestring_end(idx)?;
-        Ok(())
+        process_multilinestring(self, processor, 0)
     }
+}
+
+fn process_multilinestring<const D: usize, P: geozero::GeomProcessor>(
+    geom: &MultiLineString<'_, [f64; D]>,
+    processor: &mut P,
+    idx: usize,
+) -> Result<(), geozero::error::GeozeroError> {
+    processor.multilinestring_begin(geom.len(), idx)?;
+    for (ls_idx, ls) in geom.iter().enumerate() {
+        processor.linestring_begin(false, ls.len(), ls_idx)?;
+        for (coord_idx, coord) in ls.iter().enumerate() {
+            if processor.multi_dim() && D >= 3 {
+                processor.coordinate(
+                    coord[0],
+                    coord[1],
+                    Some(coord[2]),
+                    None,
+                    None,
+                    None,
+                    coord_idx,
+                )?;
+            } else {
+                processor.xy(coord[0], coord[1], coord_idx)?;
+            }
+        }
+        processor.linestring_end(false, ls_idx)?;
+    }
+    processor.multilinestring_end(idx)?;
+    Ok(())
 }
 
 impl<const D: usize> geozero::GeozeroGeometry for Polygon<'_, [f64; D]> {
@@ -88,30 +141,37 @@ impl<const D: usize> geozero::GeozeroGeometry for Polygon<'_, [f64; D]> {
         &self,
         processor: &mut P,
     ) -> geozero::error::Result<()> {
-        let idx = 0;
-        processor.polygon_begin(true, self.len(), idx)?;
-        for ls in self.rings() {
-            processor.linestring_begin(false, ls.len(), idx)?;
-            for point in ls.iter_closed() {
-                if processor.multi_dim() && D >= 3 {
-                    processor.coordinate(
-                        point[0],
-                        point[1],
-                        Some(point[2]),
-                        None,
-                        None,
-                        None,
-                        idx,
-                    )?;
-                } else {
-                    processor.xy(point[0], point[1], idx)?;
-                }
-            }
-            processor.linestring_end(false, idx)?;
-        }
-        processor.polygon_end(true, idx)?;
-        Ok(())
+        process_polygon(self, processor, 0)
     }
+}
+
+fn process_polygon<const D: usize, P: geozero::GeomProcessor>(
+    geom: &Polygon<'_, [f64; D]>,
+    processor: &mut P,
+    idx: usize,
+) -> Result<(), geozero::error::GeozeroError> {
+    processor.polygon_begin(true, geom.len(), idx)?;
+    for (ls_idx, ls) in geom.rings().enumerate() {
+        processor.linestring_begin(false, ls.len(), ls_idx)?;
+        for (coord_idx, coord) in ls.iter_closed().enumerate() {
+            if processor.multi_dim() && D >= 3 {
+                processor.coordinate(
+                    coord[0],
+                    coord[1],
+                    Some(coord[2]),
+                    None,
+                    None,
+                    None,
+                    coord_idx,
+                )?;
+            } else {
+                processor.xy(coord[0], coord[1], coord_idx)?;
+            }
+        }
+        processor.linestring_end(false, ls_idx)?;
+    }
+    processor.polygon_end(true, idx)?;
+    Ok(())
 }
 
 impl<const D: usize> geozero::GeozeroGeometry for MultiPolygon<'_, [f64; D]> {
@@ -119,33 +179,39 @@ impl<const D: usize> geozero::GeozeroGeometry for MultiPolygon<'_, [f64; D]> {
         &self,
         processor: &mut P,
     ) -> geozero::error::Result<()> {
-        let idx = 0;
-
-        processor.multipolygon_begin(self.len(), idx)?;
-        for poly in self.iter() {
-            processor.polygon_begin(false, poly.len() + 1, idx)?;
-            for ls in poly.rings() {
-                processor.linestring_begin(false, ls.len(), idx)?;
-                for point in ls.iter_closed() {
-                    if processor.multi_dim() && D >= 3 {
-                        processor.coordinate(
-                            point[0],
-                            point[1],
-                            Some(point[2]),
-                            None,
-                            None,
-                            None,
-                            idx,
-                        )?;
-                    } else {
-                        processor.xy(point[0], point[1], idx)?;
-                    }
-                }
-                processor.linestring_end(false, idx)?;
-            }
-            processor.polygon_end(false, idx)?;
-        }
-        processor.multipolygon_end(idx)?;
-        Ok(())
+        process_multipolygon(self, processor, 0)
     }
+}
+
+fn process_multipolygon<const D: usize, P: geozero::GeomProcessor>(
+    geom: &MultiPolygon<'_, [f64; D]>,
+    processor: &mut P,
+    idx: usize,
+) -> Result<(), geozero::error::GeozeroError> {
+    processor.multipolygon_begin(geom.len(), idx)?;
+    for (poly_idx, poly) in geom.iter().enumerate() {
+        processor.polygon_begin(false, poly.len() + 1, poly_idx)?;
+        for (ls_idx, ls) in poly.rings().enumerate() {
+            processor.linestring_begin(false, ls.len(), ls_idx)?;
+            for (coord_idx, coord) in ls.iter_closed().enumerate() {
+                if processor.multi_dim() && D >= 3 {
+                    processor.coordinate(
+                        coord[0],
+                        coord[1],
+                        Some(coord[2]),
+                        None,
+                        None,
+                        None,
+                        coord_idx,
+                    )?;
+                } else {
+                    processor.xy(coord[0], coord[1], coord_idx)?;
+                }
+            }
+            processor.linestring_end(false, ls_idx)?;
+        }
+        processor.polygon_end(false, poly_idx)?;
+    }
+    processor.multipolygon_end(idx)?;
+    Ok(())
 }
