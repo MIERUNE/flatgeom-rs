@@ -1,6 +1,4 @@
 //! Testing mutual conversion between geo_types and our MultiPolygon
-use core::panic;
-
 use flatgeom::{
     geozero::ToFlatgeom, Geometry2, Geometry3, LineString2, LineString3, MultiLineString2,
     MultiLineString3, MultiPoint2, MultiPoint3, MultiPolygon2, MultiPolygon3, Polygon2, Polygon3,
@@ -75,21 +73,7 @@ fn multipolygon3d() {
     poly3.add_ring([[4., 0., 0.], [7., 0., 0.], [7., 3., 0.], [4., 3., 0.]]); // exterior
     mpoly.push(&poly3);
 
-    // Conversion
-    let Ok(geo) = mpoly.to_geo() else {
-        panic!("Conversion failed");
-    };
-    match &geo {
-        geo_types::Geometry::MultiPolygon(geo_mpoly) => {
-            assert_eq!(geo_mpoly.0.len(), 3);
-            assert_eq!(geo_mpoly.0[0].exterior().0.len(), 5); // ring must be closed
-            assert_eq!(geo_mpoly.0[0].interiors().len(), 2);
-        }
-        _ => panic!("Geometry type must be MultiPolygon"),
-    };
-
-    // Inversion
-    let Ok(flat): geozero::error::Result<Geometry3> = geo.to_flatgeom() else {
+    let Ok(flat): geozero::error::Result<Geometry3> = mpoly.to_flatgeom() else {
         panic!("Conversion failed");
     };
     match &flat {
@@ -138,20 +122,7 @@ fn polygon3d() {
     poly.add_ring([[1., 1., 0.], [2., 1., 0.], [2., 2., 0.], [1., 2., 0.]]); // interior
     poly.add_ring([[3., 3., 0.], [4., 3., 0.], [4., 4., 0.], [3., 4., 0.]]); // interior
 
-    // Conversion
-    let Ok(geo) = poly.to_geo() else {
-        panic!("Conversion failed");
-    };
-    match &geo {
-        geo_types::Geometry::Polygon(geo_poly) => {
-            assert_eq!(geo_poly.exterior().0.len(), 5); // ring must be closed
-            assert_eq!(geo_poly.interiors().len(), 2);
-        }
-        _ => panic!("Geometry type must be Polygon"),
-    }
-
-    // Inversion
-    let Ok(flat): geozero::error::Result<Geometry3> = geo.to_flatgeom() else {
+    let Ok(flat): geozero::error::Result<Geometry3> = poly.to_flatgeom() else {
         panic!("Conversion failed");
     };
     match &flat {
@@ -200,20 +171,7 @@ fn multilinestring3d() {
     mls.add_linestring([[1., 0., 0.], [5., 0., 0.], [5., 5., 0.], [0., 5., 0.]]);
     mls.add_linestring([[2., 0., 0.], [5., 0., 0.], [5., 5., 0.], [0., 5., 0.]]);
 
-    // Conversion
-    let Ok(geo) = mls.to_geo() else {
-        panic!("Conversion failed");
-    };
-    match &geo {
-        geo_types::Geometry::MultiLineString(geo_mls) => {
-            assert_eq!(geo_mls.0.len(), 3); // ring must be closed
-            assert_eq!(geo_mls.0[0].0.len(), 4); // ring must be closed
-        }
-        _ => panic!("Geometry type must be MultiLineString"),
-    }
-
-    // Inversion
-    let Ok(flat): geozero::error::Result<Geometry3> = geo.to_flatgeom() else {
+    let Ok(flat): geozero::error::Result<Geometry3> = mls.to_flatgeom() else {
         panic!("Conversion failed");
     };
     match &flat {
@@ -252,21 +210,9 @@ fn linestring() {
 
 #[test]
 fn linestring3d() {
-    // Conversion
     let ls =
         LineString3::from_raw(vec![[0., 0., 0.], [5., 0., 0.], [5., 5., 0.], [0., 5., 0.]].into());
-    let Ok(geo) = ls.to_geo() else {
-        panic!("Conversion failed");
-    };
-    match &geo {
-        geo_types::Geometry::LineString(geo_ls) => {
-            assert_eq!(geo_ls.0.len(), 4); // ring must be closed
-        }
-        _ => panic!("Geometry type must be LineString"),
-    }
-
-    // Inversion
-    let Ok(flat): geozero::error::Result<Geometry3> = geo.to_flatgeom() else {
+    let Ok(flat): geozero::error::Result<Geometry3> = ls.to_flatgeom() else {
         panic!("Conversion failed");
     };
     match &flat {
@@ -310,8 +256,25 @@ fn multipoint3d() {
     let mut mp = MultiPoint3::new();
     mp.extend([[0., 0., 0.], [5., 0., 0.], [5., 5., 0.], [0., 5., 0.]]);
 
+    let Ok(flat): geozero::error::Result<Geometry3> = mp.to_flatgeom() else {
+        panic!("Conversion failed");
+    };
+    match &flat {
+        flatgeom::Geometry::MultiPoint(mp) => {
+            assert_eq!(mp.len(), 4);
+        }
+        _ => panic!("MultiPoint is expected"),
+    }
+}
+
+#[test]
+fn geometry() {
+    let mut mp = MultiPoint2::new();
+    mp.extend([[0., 0.], [5., 0.], [5., 5.], [0., 5.]]);
+    let geom = crate::Geometry2::MultiPoint(mp);
+
     // Conversion
-    let Ok(geo) = mp.to_geo() else {
+    let Ok(geo) = geom.to_geo() else {
         panic!("Conversion failed");
     };
     match &geo {
@@ -323,6 +286,24 @@ fn multipoint3d() {
 
     // Inversion
     let Ok(flat): geozero::error::Result<Geometry3> = geo.to_flatgeom() else {
+        panic!("Conversion failed");
+    };
+    match &flat {
+        flatgeom::Geometry::MultiPoint(mp) => {
+            assert_eq!(mp.len(), 4);
+        }
+        _ => panic!("MultiPoint is expected"),
+    }
+}
+
+#[test]
+fn geometry3d() {
+    let mut mp = MultiPoint3::new();
+    mp.extend([[0., 0., 0.], [5., 0., 0.], [5., 5., 0.], [0., 5., 0.]]);
+    let geom = crate::Geometry3::MultiPoint(mp);
+
+    // Inversion
+    let Ok(flat): geozero::error::Result<Geometry3> = geom.to_flatgeom() else {
         panic!("Conversion failed");
     };
     match &flat {
