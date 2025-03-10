@@ -3,7 +3,7 @@
 [![Test](https://github.com/MIERUNE/flatgeom-rs/actions/workflows/Test.yml/badge.svg)](https://github.com/MIERUNE/flatgeom-rs/actions/workflows/Test.yml)
 [![codecov](https://codecov.io/gh/MIERUNE/flatgeom-rs/graph/badge.svg?token=iFJds9bJoo)](https://codecov.io/gh/MIERUNE/flatgeom-rs)
 
-Geospatial geometry primitives using flat data structures instead of jagged arrays to represent Polygons, MultiPolygons, and other geometries. This design is mainly intended to prioritize efficient serialization and deserialization.
+Geospatial geometry primitives (e.g., Polygons, MultiPolygons) that use flat data structures instead of jagged arrays for efficient serialization and deserialization.
 
 ## Visual examples of the data structure
 
