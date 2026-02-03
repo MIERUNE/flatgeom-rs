@@ -1,10 +1,10 @@
 [package]
 name = "flatgeom"
 version = "0.0.2"
-edition = "2021"
+edition = "2024"
 description = "Geospatial geometry primitives using flat structures instead of jagged arrays"
 repository = "https://github.com/MIERUNE/flatgeom-rs"
-authors = ["MIERUNE Inc. <info@mierune.co.jp>"]
+authors = ["Taku Fukada <naninunenor@gmail.com>", "MIERUNE Inc. <info@mierune.co.jp>"]
 license = "MIT"
 categories = ["graphics", "science", "no-std"]
 
