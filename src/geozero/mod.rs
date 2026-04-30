@@ -1,9 +1,9 @@
-pub mod reader;
-pub mod writer;
+mod reader;
+mod writer;
 
 use alloc::string::ToString;
-use geozero::error::{GeozeroError, Result};
 use geozero::GeozeroGeometry;
+use geozero::error::{GeozeroError, Result};
 
 pub trait ToFlatgeom<const D: usize> {
     fn to_flatgeom(&self) -> Result<crate::Geometry<[f64; D]>>;

@@ -1,131 +1,175 @@
 use crate::Coord2d;
-use alloc::borrow::Cow;
+use alloc::vec;
+use alloc::vec::Vec;
 
-use super::{linestring::LineString, Coord};
+use super::{
+    Coord,
+    linestring::{LineStringRef, LineStringView},
+    offsets::{extend_ring_dedup_closing, rebase_offsets, validate_offsets},
+};
+
+#[cfg(feature = "serde")]
+use super::offsets::{OffsetLengths, offsets_from_lengths};
 
 /// Computer-friendly Polygon
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Polygon<'a, T: Coord> {
+#[derive(Debug, Clone, PartialEq)]
+pub struct Polygon<T: Coord> {
     /// Coordinates
-    coords: Cow<'a, [T]>,
+    coords: Vec<T>,
 
-    /// A sequence of indices from which each hole starts
-    hole_indices: Cow<'a, [u32]>,
+    /// A sequence of offsets into coords from which each ring starts.
+    ///
+    /// The first offset is always 0, and the last offset is always coords.len().
+    ring_offsets: Vec<u32>,
 }
 
-pub type Polygon3<'a, C = f64> = Polygon<'a, [C; 3]>;
-pub type Polygon2<'a, C = f64> = Polygon<'a, [C; 2]>;
+pub type Polygon3<C = f64> = Polygon<[C; 3]>;
+pub type Polygon2<C = f64> = Polygon<[C; 2]>;
 
-impl<'a, T: Coord> Polygon<'a, T> {
-    /// Creates an empty Polygon.
-    pub fn new() -> Self {
-        Self {
-            coords: Cow::Borrowed(&[]),
-            hole_indices: Cow::Borrowed(&[]),
+/// Read-only borrowed view of a Polygon (may use absolute offsets into a parent buffer).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PolygonView<'a, T: Coord> {
+    coords: &'a [T],
+    ring_offsets: &'a [u32],
+}
+
+#[cfg(feature = "serde")]
+impl<T> serde::Serialize for Polygon<T>
+where
+    T: Coord + serde::Serialize,
+{
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serialize_polygon(self, serializer)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<T> serde::Serialize for PolygonView<'_, T>
+where
+    T: Coord + serde::Serialize,
+{
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serialize_polygon(self, serializer)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de, T> serde::Deserialize<'de> for Polygon<T>
+where
+    T: Coord + serde::Deserialize<'de>,
+{
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        struct PolygonSerde<T> {
+            coords: Vec<T>,
+            topology: Vec<u32>,
+        }
+
+        let value = PolygonSerde::deserialize(deserializer)?;
+        let ring_offsets =
+            offsets_from_lengths::<D::Error>(&value.topology, value.coords.len(), "topology")?;
+        Ok(Polygon::from_raw_unchecked(value.coords, ring_offsets))
+    }
+}
+
+#[cfg(feature = "serde")]
+fn serialize_polygon<T, P, S>(polygon: &P, serializer: S) -> Result<S::Ok, S::Error>
+where
+    T: Coord + serde::Serialize,
+    P: PolygonRef<T> + ?Sized,
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeStruct;
+
+    let mut s = serializer.serialize_struct("Polygon", 2)?;
+    s.serialize_field("coords", polygon.raw_coords())?;
+    s.serialize_field("topology", &OffsetLengths(polygon.ring_lengths()))?;
+    s.end()
+}
+
+pub type PolygonView2<'a, C = f64> = PolygonView<'a, [C; 2]>;
+pub type PolygonView3<'a, C = f64> = PolygonView<'a, [C; 3]>;
+
+/// Read-only abstraction over [`Polygon`] and [`PolygonView`].
+///
+/// Default impls assume `coords` and `ring_offsets` are mutually consistent —
+/// i.e. `coords[ring_offsets[i]..ring_offsets[i + 1]]` yields ring `i`. This
+/// holds whether `ring_offsets` are zero-based (owned `Polygon`) or absolute
+/// into a parent buffer (`PolygonView` from `MultiPolygon`).
+pub trait PolygonRef<T: Coord> {
+    fn coords(&self) -> &[T];
+    fn ring_offsets(&self) -> &[u32];
+
+    fn len(&self) -> usize {
+        self.ring_offsets().len().saturating_sub(1)
+    }
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    /// Returns only this polygon's coordinates (sliced from the underlying buffer).
+    fn raw_coords(&self) -> &[T] {
+        let r = self.ring_offsets();
+        match (r.first(), r.last()) {
+            (Some(&s), Some(&e)) => &self.coords()[s as usize..e as usize],
+            _ => &[],
         }
     }
-
-    pub fn from_raw(coords: Cow<'a, [T]>, hole_indices: Cow<'a, [u32]>) -> Self {
-        // Check if all span values are within range and monotonically increasing
-        if let Some(&last) = hole_indices.last() {
-            let len = (coords.len()) as u32;
-            if last >= len || hole_indices.windows(2).any(|a| a[0] >= a[1]) {
-                panic!("invalid hole_indices")
-            }
-        }
-        Self {
-            coords,
-            hole_indices,
-        }
+    /// Returns ring vertex counts, derived as deltas of consecutive ring offsets.
+    fn ring_lengths(&self) -> impl Clone + ExactSizeIterator<Item = u32> + '_ {
+        self.ring_offsets()
+            .windows(2)
+            .map(|window| window[1] - window[0])
     }
-
-    pub fn from_raw_unchecked(coords: Cow<'a, [T]>, hole_indices: Cow<'a, [u32]>) -> Self {
-        Self {
-            coords,
-            hole_indices,
-        }
-    }
-
-    pub fn raw_coords(&self) -> &[T] {
-        self.coords.as_ref()
-    }
-
-    /// A sequence of indices from which each hole starts
-    pub fn hole_indices(&self) -> &[u32] {
-        self.hole_indices.as_ref()
-    }
-
-    /// Returns the number of rings (including the exterior ring)
-    pub fn len(&self) -> usize {
-        self.hole_indices.len() + 1
-    }
-
-    pub fn is_empty(&self) -> bool {
-        false
-    }
-
-    /// Returns the exterior ring of the polygon.
-    pub fn exterior(&self) -> LineString<T> {
-        LineString::from_raw(if self.hole_indices.is_empty() {
-            self.coords[..].into()
+    fn exterior(&self) -> LineStringView<'_, T> {
+        if self.is_empty() {
+            LineStringView::from_raw(&[])
         } else {
-            self.coords[..self.hole_indices[0] as usize].into()
-        })
-    }
-
-    /// Returns an iterator over the interior rings of the polygon.
-    pub fn interiors(&self) -> Iter<T> {
-        Iter { poly: self, pos: 1 }
-    }
-
-    /// Returns an iterator over the exterior and interior rings of the polygon.
-    pub fn rings(&self) -> Iter<T> {
-        Iter { poly: self, pos: 0 }
-    }
-
-    /// Remove all rings from the polygon.
-    pub fn clear(&mut self) {
-        self.coords.to_mut().clear();
-        self.hole_indices.to_mut().clear();
-    }
-
-    /// Adds an exterior or interior ring to the polygon.
-    pub fn add_ring<I: IntoIterator<Item = T>>(&mut self, iter: I) {
-        if !self.coords.is_empty() {
-            self.hole_indices.to_mut().push((self.coords.len()) as u32);
-        }
-        let head = self.coords.len();
-        self.coords.to_mut().extend(iter);
-
-        // remove closing point if exists
-        let tail = self.coords.len();
-        if tail > head + 2 && self.coords[head..head + 1] == self.coords[tail - 1..] {
-            self.coords.to_mut().truncate(tail - 1);
+            let r = self.ring_offsets();
+            LineStringView::from_raw(&self.coords()[r[0] as usize..r[1] as usize])
         }
     }
-
-    /// Create a new Polygon by applying the given transformation to all coordinates.
-    pub fn transform<T2: Coord>(&self, f: impl Fn(&T) -> T2) -> Polygon<T2> {
-        Polygon {
-            coords: self.coords.iter().map(f).collect(),
-            hole_indices: self.hole_indices.clone(),
+    fn interiors<'a>(&'a self) -> impl Iterator<Item = LineStringView<'a, T>> + 'a
+    where
+        T: 'a,
+    {
+        let r = self.ring_offsets();
+        let coords = self.coords();
+        let len = self.len();
+        (1..len).map(move |i| LineStringView::from_raw(&coords[r[i] as usize..r[i + 1] as usize]))
+    }
+    fn rings<'a>(&'a self) -> impl Iterator<Item = LineStringView<'a, T>> + 'a
+    where
+        T: 'a,
+    {
+        let r = self.ring_offsets();
+        let coords = self.coords();
+        let len = self.len();
+        (0..len).map(move |i| LineStringView::from_raw(&coords[r[i] as usize..r[i + 1] as usize]))
+    }
+    fn ring(&self, index: usize) -> Option<LineStringView<'_, T>> {
+        let r = self.ring_offsets();
+        if index >= self.len() {
+            return None;
         }
+        Some(LineStringView::from_raw(
+            &self.coords()[r[index] as usize..r[index + 1] as usize],
+        ))
     }
-
-    /// Applies the given transformation to all coordinates in the Polygon.
-    pub fn transform_inplace(&mut self, mut f: impl FnMut(&T) -> T) {
-        self.coords.to_mut().iter_mut().for_each(|c| {
-            *c = f(c);
-        });
+    /// Earcut-compatible polygon-local hole start indices (in vertex units).
+    fn hole_indices(&self) -> impl Iterator<Item = u32> + '_ {
+        let r = self.ring_offsets();
+        let base = r.first().copied().unwrap_or(0);
+        r.iter()
+            .copied()
+            .skip(1)
+            .take(self.len().saturating_sub(1))
+            .map(move |o| o - base)
     }
-}
-
-// 2-dimensional only
-impl<'a, T: Coord2d> Polygon<'a, T> {
-    pub fn area(&self) -> f64 {
-        let mut area = 0.0;
-        area += self.exterior().ring_area();
+    fn area(&self) -> f64
+    where
+        T: Coord2d,
+    {
+        let mut area = self.exterior().ring_area();
         for interior in self.interiors() {
             area -= interior.ring_area();
         }
@@ -133,34 +177,104 @@ impl<'a, T: Coord2d> Polygon<'a, T> {
     }
 }
 
-pub struct Iter<'a, T: Coord> {
-    poly: &'a Polygon<'a, T>,
-    pos: usize,
+impl<T: Coord> PolygonRef<T> for Polygon<T> {
+    fn coords(&self) -> &[T] {
+        &self.coords
+    }
+    fn ring_offsets(&self) -> &[u32] {
+        &self.ring_offsets
+    }
 }
 
-impl<'a, T: Coord> Iterator for Iter<'a, T> {
-    type Item = LineString<'a, T>;
+impl<T: Coord> PolygonRef<T> for PolygonView<'_, T> {
+    fn coords(&self) -> &[T] {
+        self.coords
+    }
+    fn ring_offsets(&self) -> &[u32] {
+        self.ring_offsets
+    }
+}
 
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.pos < self.poly.hole_indices.len() + 1 {
-            let start = if self.pos == 0 {
-                0
-            } else {
-                self.poly.hole_indices[self.pos - 1] as usize
-            };
+impl<T: Coord, R: PolygonRef<T> + ?Sized> PolygonRef<T> for &R {
+    fn coords(&self) -> &[T] {
+        (**self).coords()
+    }
+    fn ring_offsets(&self) -> &[u32] {
+        (**self).ring_offsets()
+    }
+}
 
-            let end = if self.pos == self.poly.hole_indices.len() {
-                self.poly.coords.len()
-            } else {
-                self.poly.hole_indices[self.pos] as usize
-            };
-
-            let line = LineString::from_raw(self.poly.coords[start..end].into());
-            self.pos += 1;
-            Some(line)
-        } else {
-            None
+impl<'a, T: Coord> PolygonView<'a, T> {
+    pub const fn from_raw(coords: &'a [T], ring_offsets: &'a [u32]) -> Self {
+        Self {
+            coords,
+            ring_offsets,
         }
+    }
+
+    /// Materializes a self-contained owned `Polygon` (rebases ring_offsets to
+    /// 0-based and copies just this polygon's coords) from this view.
+    pub fn to_owned(&self) -> Polygon<T> {
+        let (coords, ring_offsets) = rebase_offsets(self.coords, self.ring_offsets);
+        Polygon::from_raw_unchecked(coords, ring_offsets)
+    }
+}
+
+impl<T: Coord> Default for Polygon<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T: Coord> Polygon<T> {
+    /// Creates an empty Polygon.
+    pub fn new() -> Self {
+        Self {
+            coords: Vec::new(),
+            ring_offsets: vec![0],
+        }
+    }
+
+    pub fn from_raw(coords: Vec<T>, ring_offsets: Vec<u32>) -> Self {
+        validate_offsets(coords.len(), &ring_offsets, "ring_offsets");
+        Self {
+            coords,
+            ring_offsets,
+        }
+    }
+
+    pub fn from_raw_unchecked(coords: Vec<T>, ring_offsets: Vec<u32>) -> Self {
+        Self {
+            coords,
+            ring_offsets,
+        }
+    }
+
+    /// Remove all rings from the polygon.
+    pub fn clear(&mut self) {
+        self.coords.clear();
+        self.ring_offsets.clear();
+        self.ring_offsets.push(0);
+    }
+
+    /// Adds an exterior or interior ring to the polygon.
+    pub fn add_ring<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        extend_ring_dedup_closing(&mut self.coords, &mut self.ring_offsets, iter);
+    }
+
+    /// Create a new Polygon by applying the given transformation to all coordinates.
+    pub fn transform<T2: Coord>(&self, f: impl Fn(&T) -> T2) -> Polygon<T2> {
+        Polygon {
+            coords: self.coords.iter().map(f).collect(),
+            ring_offsets: self.ring_offsets.clone(),
+        }
+    }
+
+    /// Applies the given transformation to all coordinates in the Polygon.
+    pub fn transform_inplace(&mut self, mut f: impl FnMut(&T) -> T) {
+        self.coords.iter_mut().for_each(|c| {
+            *c = f(c);
+        });
     }
 }
 
@@ -180,9 +294,8 @@ mod tests {
     #[test]
     fn test_polygon_no_interior() {
         let coords: Vec<_> = (0..=10).map(|i| [i as f64, i as f64]).collect();
-        let hole_indices: Vec<u32> = vec![];
-        let polygon: Polygon2<f64> =
-            Polygon2::from_raw_unchecked(coords.into(), hole_indices.into());
+        let ring_offsets: Vec<u32> = vec![0, 11];
+        let polygon: Polygon2<f64> = Polygon2::from_raw_unchecked(coords, ring_offsets);
 
         assert_eq!(polygon.exterior().len(), 11);
         assert_eq!(polygon.interiors().count(), 0);
@@ -191,9 +304,8 @@ mod tests {
     #[test]
     fn test_polygon_one_interior() {
         let coords: Vec<_> = (0..=10).map(|i| [i as f64, i as f64]).collect();
-        let hole_indices: Vec<u32> = vec![4];
-        let polygon: Polygon2<f64> =
-            Polygon2::from_raw_unchecked(coords.into(), hole_indices.into());
+        let ring_offsets: Vec<u32> = vec![0, 4, 11];
+        let polygon: Polygon2<f64> = Polygon2::from_raw_unchecked(coords, ring_offsets);
 
         assert_eq!(polygon.exterior().len(), 4);
         assert_eq!(polygon.interiors().count(), 1);
@@ -208,9 +320,8 @@ mod tests {
     #[test]
     fn test_polygon_multiple_interiors() {
         let coords: Vec<_> = (0..=10).map(|i| [i as f64, i as f64]).collect();
-        let hole_indices: Vec<u32> = vec![4, 7];
-        let polygon: Polygon2<f64> =
-            Polygon2::from_raw_unchecked(coords.into(), hole_indices.into());
+        let ring_offsets: Vec<u32> = vec![0, 4, 7, 11];
+        let polygon: Polygon2<f64> = Polygon2::from_raw_unchecked(coords, ring_offsets);
 
         assert_eq!(polygon.exterior().len(), 4);
         assert_eq!(polygon.interiors().count(), 2);
@@ -226,9 +337,8 @@ mod tests {
     #[test]
     fn test_polygon_clear() {
         let coords: Vec<_> = (0..=10).map(|i| [i as f64, i as f64]).collect();
-        let hole_indices: Vec<u32> = vec![4, 7];
-        let mut polygon: Polygon2<f64> =
-            Polygon2::from_raw_unchecked(coords.into(), hole_indices.into());
+        let ring_offsets: Vec<u32> = vec![0, 4, 7, 11];
+        let mut polygon: Polygon2<f64> = Polygon2::from_raw_unchecked(coords, ring_offsets);
 
         assert_eq!(polygon.exterior().len(), 4);
         assert_eq!(polygon.interiors().count(), 2);
@@ -283,8 +393,8 @@ mod tests {
     #[test]
     fn test_polygon_invalid_exterior() {
         let coords: Vec<_> = (0..1).map(|i| [i as f64, i as f64]).collect();
-        let hole_indices: Vec<u32> = vec![];
-        let polygon: Polygon2<f64> = Polygon2::from_raw(coords.into(), hole_indices.into());
+        let ring_offsets: Vec<u32> = vec![0, 1];
+        let polygon: Polygon2<f64> = Polygon2::from_raw(coords, ring_offsets);
 
         assert_eq!(polygon.exterior().len(), 1); // only one vertex
         assert_eq!(polygon.interiors().count(), 0);
@@ -294,9 +404,9 @@ mod tests {
     /// (It could be a "Steiner point", as we see in earcut)
     #[test]
     fn test_polygon_invalid_interior() {
-        let all_coords: Vec<_> = (0..=10).map(|i| [i as f64, i as f64]).collect();
-        let hole_indices: Vec<u32> = vec![10]; // only one vertex
-        let polygon: Polygon2<f64> = Polygon2::from_raw(all_coords.into(), hole_indices.into());
+        let coords: Vec<_> = (0..=10).map(|i| [i as f64, i as f64]).collect();
+        let ring_offsets: Vec<u32> = vec![0, 10, 11]; // only one vertex
+        let polygon: Polygon2<f64> = Polygon2::from_raw(coords, ring_offsets);
 
         assert_eq!(polygon.exterior().len(), 10);
         assert_eq!(polygon.interiors().count(), 1);
@@ -310,18 +420,18 @@ mod tests {
 
     #[test]
     #[should_panic]
-    fn test_polygon_invalid_hole_indices_1() {
+    fn test_polygon_invalid_ring_offsets_1() {
         let coords: Vec<_> = (0..=2).map(|i| [i as f64, i as f64]).collect();
-        let hole_indices: Vec<u32> = vec![3]; // out of `all_coords` range
-        let _polygon: Polygon2<f64> = Polygon2::from_raw(coords.into(), hole_indices.into());
+        let ring_offsets: Vec<u32> = vec![0, 99]; // out of `coords` range
+        let _polygon: Polygon2<f64> = Polygon2::from_raw(coords, ring_offsets);
     }
 
     #[test]
     #[should_panic]
-    fn test_polygon_invalid_hole_indices_2() {
+    fn test_polygon_invalid_ring_offsets_2() {
         let coords: Vec<_> = (0..15).map(|i| [i as f64, i as f64]).collect();
-        let hole_indices: Vec<u32> = vec![6, 3]; // not monotonically increasing
-        let _polygon: Polygon2<f64> = Polygon2::from_raw(coords.into(), hole_indices.into());
+        let ring_offsets: Vec<u32> = vec![0, 6, 3, 15]; // not monotonically increasing
+        let _polygon: Polygon2<f64> = Polygon2::from_raw(coords, ring_offsets);
     }
 
     #[test]

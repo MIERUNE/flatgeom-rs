@@ -1,82 +1,132 @@
 use crate::Coord;
-use alloc::borrow::Cow;
+use alloc::vec::Vec;
 use core::ops::Range;
 
 /// Computer-friendly MultiPoint
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct MultiPoint<'a, T: Coord> {
+pub struct MultiPoint<T: Coord> {
     /// Coordinates of all points
     ///
     /// e.g. `[x0, y0, z0, x1, y1, z1, ...]`
-    coords: Cow<'a, [T]>,
+    coords: Vec<T>,
 }
 
-pub type MultiPoint2<'a, C = f64> = MultiPoint<'a, [C; 2]>;
-pub type MultiPoint3<'a, C = f64> = MultiPoint<'a, [C; 3]>;
+pub type MultiPoint2<C = f64> = MultiPoint<[C; 2]>;
+pub type MultiPoint3<C = f64> = MultiPoint<[C; 3]>;
 
-impl<'a, T: Coord> MultiPoint<'a, T> {
-    /// Creates an empty MultiPoint.
-    pub fn new() -> Self {
-        Self {
-            coords: Cow::Borrowed(&[]),
-        }
+/// Read-only borrowed view of a MultiPoint.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MultiPointView<'a, T: Coord> {
+    coords: &'a [T],
+}
+
+#[cfg(feature = "serde")]
+impl<T> serde::Serialize for MultiPointView<'_, T>
+where
+    T: Coord + serde::Serialize,
+{
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+
+        let mut s = serializer.serialize_struct("MultiPoint", 1)?;
+        s.serialize_field("coords", self.coords)?;
+        s.end()
     }
+}
 
-    pub fn from_raw(coords: Cow<'a, [T]>) -> Self {
-        Self { coords }
+pub type MultiPointView2<'a, C = f64> = MultiPointView<'a, [C; 2]>;
+pub type MultiPointView3<'a, C = f64> = MultiPointView<'a, [C; 3]>;
+
+/// Read-only abstraction over [`MultiPoint`] and [`MultiPointView`].
+pub trait MultiPointRef<T: Coord> {
+    fn raw_coords(&self) -> &[T];
+
+    fn len(&self) -> usize {
+        self.raw_coords().len()
     }
-
-    pub fn raw_coords(&self) -> &[T] {
-        self.as_ref()
+    fn is_empty(&self) -> bool {
+        self.raw_coords().is_empty()
     }
-
-    /// Returns iterator over the all points.
-    pub fn iter(&self) -> Iter<T> {
+    fn get(&self, index: usize) -> Option<T> {
+        self.raw_coords().get(index).cloned()
+    }
+    fn iter<'a>(&'a self) -> impl Iterator<Item = T> + 'a
+    where
+        T: 'a,
+    {
+        self.raw_coords().iter().cloned()
+    }
+    fn iter_range<'a>(&'a self, range: Range<usize>) -> Iter<'a, T>
+    where
+        T: 'a,
+    {
         Iter {
-            slice: &self.coords,
-            pos: 0,
-            end: self.coords.len(),
-        }
-    }
-
-    /// Returns iterator over the points in the given range.
-    pub fn iter_range(&self, range: Range<usize>) -> Iter<T> {
-        Iter {
-            slice: &self.coords,
+            slice: self.raw_coords(),
             pos: range.start,
             end: range.end,
         }
     }
+}
 
-    /// Returns the point at the given index.
-    pub fn get(&self, index: usize) -> Option<T> {
-        self.coords.get(index).cloned()
+impl<T: Coord> MultiPointRef<T> for MultiPoint<T> {
+    fn raw_coords(&self) -> &[T] {
+        &self.coords
+    }
+}
+
+impl<T: Coord> MultiPointRef<T> for MultiPointView<'_, T> {
+    fn raw_coords(&self) -> &[T] {
+        self.coords
+    }
+}
+
+impl<'a, T: Coord> MultiPointView<'a, T> {
+    pub const fn from_raw(coords: &'a [T]) -> Self {
+        Self { coords }
     }
 
-    /// Returns the number of points in the LineString.
-    pub fn len(&self) -> usize {
-        self.coords.len()
+    /// Materializes a self-contained owned `MultiPoint` from this view.
+    pub fn to_owned(&self) -> MultiPoint<T> {
+        MultiPoint::from_raw(self.coords.to_vec())
+    }
+}
+
+impl<'a, T: Coord> IntoIterator for &MultiPointView<'a, T> {
+    type Item = T;
+    type IntoIter = Iter<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        Iter {
+            slice: self.coords,
+            pos: 0,
+            end: self.coords.len(),
+        }
+    }
+}
+
+impl<T: Coord> MultiPoint<T> {
+    /// Creates an empty MultiPoint.
+    pub const fn new() -> Self {
+        Self { coords: Vec::new() }
     }
 
-    /// Returns `true` if the MultiPoint is empty.
-    pub fn is_empty(&self) -> bool {
-        self.coords.is_empty()
+    pub fn from_raw(coords: Vec<T>) -> Self {
+        Self { coords }
     }
 
     /// Appends a coordinate to the MultiPoint.
     pub fn push(&mut self, coord: T) {
-        self.coords.to_mut().push(coord);
+        self.coords.push(coord);
     }
 
     /// Extends the MultiPoint with coordinates.
     pub fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
-        self.coords.to_mut().extend(iter);
+        self.coords.extend(iter);
     }
 
-    /// Removes all points from the LineString.
+    /// Removes all points from the MultiPoint.
     pub fn clear(&mut self) {
-        self.coords.to_mut().clear();
+        self.coords.clear();
     }
 
     /// Create a new MultiPoint by applying the given transformation to all coordinates.
@@ -88,24 +138,28 @@ impl<'a, T: Coord> MultiPoint<'a, T> {
 
     /// Applies the given transformation to all coordinates in the MultiPoint.
     pub fn transform_inplace(&mut self, mut f: impl FnMut(&T) -> T) {
-        self.coords.to_mut().iter_mut().for_each(|c| {
+        self.coords.iter_mut().for_each(|c| {
             *c = f(c);
         });
     }
 }
 
-impl<T: Coord> AsRef<[T]> for MultiPoint<'_, T> {
+impl<T: Coord> AsRef<[T]> for MultiPoint<T> {
     fn as_ref(&self) -> &[T] {
-        self.coords.as_ref()
+        &self.coords
     }
 }
 
-impl<'a, T: Coord> IntoIterator for &'a MultiPoint<'_, T> {
+impl<'a, T: Coord> IntoIterator for &'a MultiPoint<T> {
     type Item = T;
     type IntoIter = Iter<'a, T>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.iter()
+        Iter {
+            slice: &self.coords,
+            pos: 0,
+            end: self.coords.len(),
+        }
     }
 }
 
@@ -120,7 +174,7 @@ impl<'a, T: Coord> Iterator for Iter<'a, T> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let v = if self.pos < self.end {
-            Some(self.slice[self.pos].clone())
+            Some(self.slice[self.pos])
         } else {
             None
         };
@@ -180,7 +234,7 @@ mod tests {
 
     #[test]
     fn test_mpoints_from_raw() {
-        let mpoints = MultiPoint2::from_raw([[1.2, 2.1], [3.4, 4.3]][..].into());
+        let mpoints = MultiPoint2::from_raw([[1.2, 2.1], [3.4, 4.3]].to_vec());
         assert_eq!(mpoints.as_ref(), [[1.2, 2.1], [3.4, 4.3]]);
         assert_eq!(mpoints.raw_coords(), [[1.2, 2.1], [3.4, 4.3]]);
     }
@@ -188,8 +242,7 @@ mod tests {
     #[test]
     fn test_transform() {
         {
-            let mpoints =
-                MultiPoint2::from_raw([[0., 0.], [5., 0.], [5., 5.], [0., 5.]][..].into());
+            let mpoints = MultiPoint2::from_raw([[0., 0.], [5., 0.], [5., 5.], [0., 5.]].to_vec());
             let new_mpoints = mpoints.transform(|[x, y]| [x + 2., y + 1.]);
             assert_eq!(
                 new_mpoints.raw_coords(),
@@ -199,7 +252,7 @@ mod tests {
 
         {
             let mut mpoints =
-                MultiPoint2::from_raw([[0., 0.], [5., 0.], [5., 5.], [0., 5.]][..].into());
+                MultiPoint2::from_raw([[0., 0.], [5., 0.], [5., 5.], [0., 5.]].to_vec());
             mpoints.transform_inplace(|[x, y]| [x + 2., y + 1.]);
             assert_eq!(
                 mpoints.raw_coords(),

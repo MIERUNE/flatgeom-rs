@@ -1,8 +1,8 @@
 [package]
 name = "flatgeom"
-version = "0.0.2"
+version = "0.1.0"
 edition = "2024"
-description = "Geospatial geometry primitives using flat structures instead of jagged arrays"
+description = "Geospatial geometry primitives represented as flat arrays with offsets"
 repository = "https://github.com/MIERUNE/flatgeom-rs"
 authors = ["Taku Fukada <naninunenor@gmail.com>", "MIERUNE Inc. <info@mierune.co.jp>"]
 license = "MIT"
@@ -12,15 +12,23 @@ categories = ["graphics", "science", "no-std"]
 default = ["geozero"]
 
 [dependencies]
-geozero = { version = "0.13.0", default-features = false, optional = true }
 num-traits = "0.2.19"
+geo-traits = { version = "0.3", default-features = false, optional = true }
+geozero = { version = "0.15", default-features = false, optional = true }
 serde = { version = "1.0.203", features = ["derive"], optional = true }
+geo-types = { version = "0.7.19", default-features = false, optional = true }
 
 [dev-dependencies]
-geo-types = "0.7"
-geojson = "0.24"
-indexmap = "2.2"
-thiserror = "1.0"
+geo-types = { version = "0.7", features = ["serde"] }
+geojson = "1"
+indexmap = "2.14"
+thiserror = "2"
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-geozero = "0.13.0"
+serde_json = "1"
+geozero = { version = "0.15", features = ["with-wkt"] }
+lz4_flex = "0.13"
+postcard = { version = "1", features = ["alloc"] }
+
+[[example]]
+name = "postcard_bench"
+required-features = ["serde"]

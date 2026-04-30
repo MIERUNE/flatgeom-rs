@@ -1,7 +1,11 @@
 //! Testing mutual conversion between geo_types and our MultiPolygon
+#![cfg(feature = "geozero")]
+
 use flatgeom::{
-    geozero::ToFlatgeom, Geometry2, Geometry3, LineString2, LineString3, MultiLineString2,
-    MultiLineString3, MultiPoint2, MultiPoint3, MultiPolygon2, MultiPolygon3, Polygon2, Polygon3,
+    Geometry2, Geometry3, GeometryCollectionRef, LineString2, LineString3, LineStringRef,
+    MultiLineString2, MultiLineString3, MultiLineStringRef, MultiPoint2, MultiPoint3,
+    geozero::ToFlatgeom, MultiPointRef, MultiPolygon2, MultiPolygon3, MultiPolygonRef, Point2,
+    PointRef, Polygon2, Polygon3, PolygonRef,
 };
 
 use geozero::ToGeo;
@@ -185,7 +189,7 @@ fn multilinestring3d() {
 #[test]
 fn linestring() {
     // Conversion
-    let ls = LineString2::from_raw(vec![[0., 0.], [5., 0.], [5., 5.], [0., 5.]].into());
+    let ls = LineString2::from_raw(vec![[0., 0.], [5., 0.], [5., 5.], [0., 5.]]);
     let Ok(geo) = ls.to_geo() else {
         panic!("Conversion failed");
     };
@@ -210,8 +214,7 @@ fn linestring() {
 
 #[test]
 fn linestring3d() {
-    let ls =
-        LineString3::from_raw(vec![[0., 0., 0.], [5., 0., 0.], [5., 5., 0.], [0., 5., 0.]].into());
+    let ls = LineString3::from_raw(vec![[0., 0., 0.], [5., 0., 0.], [5., 5., 0.], [0., 5., 0.]]);
     let Ok(flat): geozero::error::Result<Geometry3> = ls.to_flatgeom() else {
         panic!("Conversion failed");
     };
@@ -319,12 +322,15 @@ fn geometry_collection() {
     let mut mp = MultiPoint2::new();
     mp.extend([[0., 0.], [5., 0.], [5., 5.], [0., 5.]]);
 
-    let ls = LineString2::from_raw(vec![[0., 0.], [5., 0.], [5., 5.], [0., 5.]].into());
+    let ls = LineString2::from_raw(vec![[0., 0.], [5., 0.], [5., 5.], [0., 5.]]);
 
-    let geomcoll = crate::Geometry2::GeometryCollection(vec![
-        crate::Geometry2::MultiPoint(mp),
-        crate::Geometry2::LineString(ls),
-    ]);
+    let geomcoll = crate::Geometry2::GeometryCollection(
+        vec![
+            crate::Geometry2::MultiPoint(mp),
+            crate::Geometry2::LineString(ls),
+        ]
+        .into(),
+    );
 
     // Conversion
     let Ok(geo) = geomcoll.to_geo() else {
@@ -346,5 +352,31 @@ fn geometry_collection() {
             assert_eq!(mp.len(), 2);
         }
         _ => panic!("GeometryCollection is expected"),
+    }
+}
+
+#[test]
+fn point_roundtrip() {
+    let p = Point2::new([1.5, 2.5]);
+    let g: flatgeom::Geometry2 = flatgeom::Geometry::Point(p);
+
+    let Ok(geo) = g.to_geo() else {
+        panic!("Conversion failed");
+    };
+    match &geo {
+        geo_types::Geometry::Point(geo_pt) => {
+            assert_eq!((geo_pt.x(), geo_pt.y()), (1.5, 2.5));
+        }
+        _ => panic!("expected Point"),
+    }
+
+    let Ok(flat): geozero::error::Result<Geometry2> = geo.to_flatgeom() else {
+        panic!("Conversion failed");
+    };
+    match &flat {
+        flatgeom::Geometry::Point(p) => {
+            assert_eq!(p.raw_coord(), &[1.5, 2.5]);
+        }
+        _ => panic!("Point expected"),
     }
 }

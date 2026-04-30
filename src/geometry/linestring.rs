@@ -1,76 +1,153 @@
 use crate::{Coord, Coord2d};
-use alloc::borrow::Cow;
+use alloc::vec::Vec;
 
 /// Computer-friendly LineString
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct LineString<'a, T: Coord> {
+pub struct LineString<T: Coord> {
     /// Coordinates of all points
     ///
     /// e.g. `[x0, y0, z0, x1, y1, z1, ...]`
-    coords: Cow<'a, [T]>,
+    coords: Vec<T>,
 }
 
-pub type LineString2<'a, C = f64> = LineString<'a, [C; 2]>;
-pub type LineString3<'a, C = f64> = LineString<'a, [C; 3]>;
+pub type LineString2<C = f64> = LineString<[C; 2]>;
+pub type LineString3<C = f64> = LineString<[C; 3]>;
 
-impl<'a, T: Coord> LineString<'a, T> {
-    /// Creates an empty LineString.
-    pub fn new() -> Self {
-        Self {
-            coords: Cow::Borrowed(&[]),
-        }
+/// Read-only borrowed view of a LineString.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LineStringView<'a, T: Coord> {
+    coords: &'a [T],
+}
+
+#[cfg(feature = "serde")]
+impl<T> serde::Serialize for LineStringView<'_, T>
+where
+    T: Coord + serde::Serialize,
+{
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+
+        let mut s = serializer.serialize_struct("LineString", 1)?;
+        s.serialize_field("coords", self.coords)?;
+        s.end()
     }
+}
 
-    pub fn from_raw(coords: Cow<'a, [T]>) -> Self {
+pub type LineStringView2<'a, C = f64> = LineStringView<'a, [C; 2]>;
+pub type LineStringView3<'a, C = f64> = LineStringView<'a, [C; 3]>;
+
+/// Read-only abstraction over [`LineString`] and [`LineStringView`].
+pub trait LineStringRef<T: Coord> {
+    fn raw_coords(&self) -> &[T];
+
+    fn len(&self) -> usize {
+        self.raw_coords().len()
+    }
+    fn is_empty(&self) -> bool {
+        self.raw_coords().is_empty()
+    }
+    fn iter<'a>(&'a self) -> impl Iterator<Item = T> + 'a
+    where
+        T: 'a,
+    {
+        self.raw_coords().iter().cloned()
+    }
+    fn iter_closed<'a>(&'a self) -> impl Iterator<Item = T> + 'a
+    where
+        T: 'a,
+    {
+        let s = self.raw_coords();
+        s.iter().cloned().chain(s.first().cloned())
+    }
+    /// Returns true if this ring is counter-clockwise.
+    fn is_ccw(&self) -> bool
+    where
+        T: Coord2d,
+    {
+        self.signed_ring_area() > 0.0
+    }
+    /// Returns true if this ring is clockwise.
+    fn is_cw(&self) -> bool
+    where
+        T: Coord2d,
+    {
+        self.signed_ring_area() < 0.0
+    }
+    /// Calculates the unsigned area of this LineString as a ring.
+    fn ring_area(&self) -> f64
+    where
+        T: Coord2d,
+    {
+        self.signed_ring_area().abs()
+    }
+    /// Calculates the signed area of this LineString as a ring.
+    fn signed_ring_area(&self) -> f64
+    where
+        T: Coord2d,
+    {
+        signed_ring_area(self.raw_coords())
+    }
+}
+
+impl<T: Coord> LineStringRef<T> for LineString<T> {
+    fn raw_coords(&self) -> &[T] {
+        &self.coords
+    }
+}
+
+impl<T: Coord> LineStringRef<T> for LineStringView<'_, T> {
+    fn raw_coords(&self) -> &[T] {
+        self.coords
+    }
+}
+
+impl<'a, T: Coord> LineStringView<'a, T> {
+    pub const fn from_raw(coords: &'a [T]) -> Self {
         Self { coords }
     }
 
-    pub fn raw_coords(&self) -> &[T] {
-        self.as_ref()
+    /// Materializes a self-contained owned `LineString` from this view.
+    pub fn to_owned(&self) -> LineString<T> {
+        LineString::from_raw(self.coords.to_vec())
     }
+}
 
-    /// Returns iterator over the all points in the LineString.
-    pub fn iter(&self) -> Iter<T> {
+impl<'a, T: Coord> IntoIterator for &LineStringView<'a, T> {
+    type Item = T;
+    type IntoIter = Iter<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
         Iter {
-            slice: &self.coords,
+            slice: self.coords,
             pos: 0,
             close: false,
         }
     }
+}
 
-    /// Returns iterator over the all points with the start point repeated.
-    pub fn iter_closed(&self) -> Iter<T> {
-        Iter {
-            slice: &self.coords,
-            pos: 0,
-            close: true,
-        }
+impl<T: Coord> LineString<T> {
+    /// Creates an empty LineString.
+    pub const fn new() -> Self {
+        Self { coords: Vec::new() }
     }
 
-    /// Returns the number of points in the LineString.
-    pub fn len(&self) -> usize {
-        self.coords.len()
-    }
-
-    /// Returns `true` if the LineString is empty.
-    pub fn is_empty(&self) -> bool {
-        self.coords.is_empty()
+    pub fn from_raw(coords: Vec<T>) -> Self {
+        Self { coords }
     }
 
     /// Appends a point to the LineString.
     pub fn push(&mut self, coord: T) {
-        self.coords.to_mut().push(coord);
+        self.coords.push(coord);
     }
 
     /// Extends the LineString with coordinates.
     pub fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
-        self.coords.to_mut().extend(iter);
+        self.coords.extend(iter);
     }
 
     /// Removes all points from the LineString.
     pub fn clear(&mut self) {
-        self.coords.to_mut().clear();
+        self.coords.clear();
     }
 
     /// Create a new LineString by applying the given transformation to all coordinates.
@@ -82,81 +159,57 @@ impl<'a, T: Coord> LineString<'a, T> {
 
     /// Applies the given transformation to all coordinates in the LineString.
     pub fn transform_inplace(&mut self, mut f: impl FnMut(&T) -> T) {
-        self.coords.to_mut().iter_mut().for_each(|c| {
+        self.coords.iter_mut().for_each(|c| {
             *c = f(c);
         });
     }
 
     /// Reverses the coordinates in the LineString.
     pub fn reverse_inplace(&mut self) {
-        let len = self.coords.len();
-        if len > 0 {
-            let data = self.coords.to_mut();
-            for i in 0..data.len() / 2 {
-                data.swap(i, len - (i + 1));
-            }
-        }
+        self.coords.reverse();
     }
 
     /// Reverses the winding order of the coordinates in the ring, preserving the first coordinate.
     pub fn reverse_ring_inplace(&mut self) {
         let len = self.coords.len();
         if len > 1 {
-            let data = self.coords.to_mut();
-            for i in 1..(data.len() + 1) / 2 {
-                data.swap(i, len - i);
+            for i in 1..len.div_ceil(2) {
+                self.coords.swap(i, len - i);
             }
         }
     }
 }
 
-// 2-dimensional only
-impl<'a, T: Coord2d> LineString<'a, T> {
-    /// Returns true if the ring is counter-clockwise.
-    pub fn is_ccw(&self) -> bool {
-        self.signed_ring_area() > 0.0
+fn signed_ring_area<T: Coord2d>(coords: &[T]) -> f64 {
+    if coords.is_empty() {
+        return 0.0;
     }
-
-    /// Returns true if the ring is clockwise.
-    pub fn is_cw(&self) -> bool {
-        self.signed_ring_area() < 0.0
+    let mut area = 0.0;
+    let mut prev = coords[0].xy();
+    for coord in coords.iter().skip(1).chain(coords.first()) {
+        let xy = coord.xy();
+        area += (prev.0 * xy.1) - (prev.1 * xy.0);
+        prev = xy;
     }
-
-    /// Calculates the area of this LineString as a ring.
-    pub fn ring_area(&self) -> f64 {
-        self.signed_ring_area().abs()
-    }
-
-    /// Calculates the signed area of this LineString as a ring.
-    pub fn signed_ring_area(&self) -> f64 {
-        if self.is_empty() {
-            return 0.0;
-        }
-        let mut area = 0.0;
-        let mut ring_iter = self.iter_closed();
-        let mut prev = ring_iter.next().unwrap().xy();
-        // shoelace formula
-        for coord in ring_iter {
-            let xy = coord.xy();
-            area += (prev.0 * xy.1) - (prev.1 * xy.0);
-            prev = xy;
-        }
-        area / 2.0
-    }
+    area / 2.0
 }
 
-impl<T: Coord> AsRef<[T]> for LineString<'_, T> {
+impl<T: Coord> AsRef<[T]> for LineString<T> {
     fn as_ref(&self) -> &[T] {
-        self.coords.as_ref()
+        &self.coords
     }
 }
 
-impl<'a, T: Coord> IntoIterator for &'a LineString<'_, T> {
+impl<'a, T: Coord> IntoIterator for &'a LineString<T> {
     type Item = T;
     type IntoIter = Iter<'a, T>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.iter()
+        Iter {
+            slice: &self.coords,
+            pos: 0,
+            close: false,
+        }
     }
 }
 
@@ -171,9 +224,9 @@ impl<'a, T: Coord> Iterator for Iter<'a, T> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let v = if self.pos < self.slice.len() {
-            Some(self.slice[self.pos].clone())
+            Some(self.slice[self.pos])
         } else if self.close && !self.slice.is_empty() && self.pos == self.slice.len() {
-            Some(self.slice[0].clone())
+            Some(self.slice[0])
         } else {
             None
         };
@@ -193,8 +246,7 @@ mod tests {
         let mut line: LineString2 = LineString2::from_raw(
             (0..4)
                 .map(|v| [v as f64, v as f64])
-                .collect::<Vec<[f64; 2]>>()
-                .into(),
+                .collect::<Vec<[f64; 2]>>(),
         );
         assert_eq!(line.len(), 4);
         assert!(!line.is_empty());
@@ -236,8 +288,7 @@ mod tests {
         let line: LineString2 = LineString2::from_raw(
             (0..3)
                 .map(|v| [v as f64, v as f64])
-                .collect::<Vec<[f64; 2]>>()
-                .into(),
+                .collect::<Vec<[f64; 2]>>(),
         );
         assert_eq!(line.len(), 3);
         assert!(!line.is_empty());
@@ -255,7 +306,7 @@ mod tests {
     #[test]
     fn test_transform() {
         {
-            let line = LineString2::from_raw(vec![[0., 0.], [5., 0.], [5., 5.], [0., 5.]].into());
+            let line = LineString2::from_raw(vec![[0., 0.], [5., 0.], [5., 5.], [0., 5.]]);
             let new_line = line.transform(|[x, y]| [x + 2., y + 1.]);
             assert_eq!(
                 new_line.raw_coords(),
@@ -264,8 +315,7 @@ mod tests {
         }
 
         {
-            let mut line =
-                LineString2::from_raw([[0., 0.], [5., 0.], [5., 5.], [0., 5.]][..].into());
+            let mut line = LineString2::from_raw([[0., 0.], [5., 0.], [5., 5.], [0., 5.]].to_vec());
             line.transform_inplace(|[x, y]| [x + 2., y + 1.]);
             assert_eq!(line.raw_coords(), [[2., 1.], [7., 1.], [7., 6.], [2., 6.]]);
         }
@@ -273,34 +323,29 @@ mod tests {
 
     #[test]
     fn test_winding_order() {
-        let line =
-            LineString2::from_raw(vec![[0.0, 0.0], [3.0, 0.0], [3.0, 3.0], [0.0, 3.0]].into());
+        let line = LineString2::from_raw(vec![[0.0, 0.0], [3.0, 0.0], [3.0, 3.0], [0.0, 3.0]]);
         assert!(line.is_ccw());
         assert!(!line.is_cw());
 
-        let line =
-            LineString2::from_raw(vec![[0.0, 0.0], [0.0, 3.0], [3.0, 3.0], [3.0, 0.0]].into());
+        let line = LineString2::from_raw(vec![[0.0, 0.0], [0.0, 3.0], [3.0, 3.0], [3.0, 0.0]]);
         assert!(!line.is_ccw());
         assert!(line.is_cw());
 
-        let line = LineString2::from_raw(vec![[0.0, 0.0], [0.0, 0.0]].into());
+        let line = LineString2::from_raw(vec![[0.0, 0.0], [0.0, 0.0]]);
         assert!(!line.is_ccw());
         assert!(!line.is_cw());
     }
 
     #[test]
     fn test_reverse() {
-        let mut line = LineString2::from_raw(
-            vec![
-                [0.0, 0.0],
-                [3.0, 0.0],
-                [3.0, 1.0],
-                [3.0, 3.0],
-                [1.0, 3.0],
-                [0.0, 3.0],
-            ]
-            .into(),
-        );
+        let mut line = LineString2::from_raw(vec![
+            [0.0, 0.0],
+            [3.0, 0.0],
+            [3.0, 1.0],
+            [3.0, 3.0],
+            [1.0, 3.0],
+            [0.0, 3.0],
+        ]);
         line.reverse_inplace();
         assert_eq!(
             line.raw_coords(),
@@ -314,9 +359,13 @@ mod tests {
             ]
         );
 
-        let mut line = LineString2::from_raw(
-            vec![[0.0, 0.0], [3.0, 0.0], [6.0, 0.0], [6.0, 3.0], [3.0, 3.0]].into(),
-        );
+        let mut line = LineString2::from_raw(vec![
+            [0.0, 0.0],
+            [3.0, 0.0],
+            [6.0, 0.0],
+            [6.0, 3.0],
+            [3.0, 3.0],
+        ]);
         line.reverse_inplace();
         assert_eq!(
             line.raw_coords(),
@@ -326,17 +375,14 @@ mod tests {
 
     #[test]
     fn test_ring_reverse() {
-        let mut line = LineString2::from_raw(
-            vec![
-                [0.0, 0.0],
-                [3.0, 0.0],
-                [3.0, 1.0],
-                [3.0, 3.0],
-                [1.0, 3.0],
-                [0.0, 3.0],
-            ]
-            .into(),
-        );
+        let mut line = LineString2::from_raw(vec![
+            [0.0, 0.0],
+            [3.0, 0.0],
+            [3.0, 1.0],
+            [3.0, 3.0],
+            [1.0, 3.0],
+            [0.0, 3.0],
+        ]);
         line.reverse_ring_inplace();
         assert_eq!(
             line.raw_coords(),
@@ -350,9 +396,13 @@ mod tests {
             ]
         );
 
-        let mut line = LineString2::from_raw(
-            vec![[0.0, 0.0], [3.0, 0.0], [6.0, 0.0], [6.0, 3.0], [3.0, 3.0]].into(),
-        );
+        let mut line = LineString2::from_raw(vec![
+            [0.0, 0.0],
+            [3.0, 0.0],
+            [6.0, 0.0],
+            [6.0, 3.0],
+            [3.0, 3.0],
+        ]);
         line.reverse_ring_inplace();
         assert_eq!(
             line.raw_coords(),

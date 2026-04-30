@@ -1,185 +1,386 @@
-use alloc::borrow::Cow;
+use alloc::vec;
+use alloc::vec::Vec;
 use core::ops::Range;
 
-use super::{polygon::Polygon, Coord};
+use super::{
+    Coord,
+    offsets::{extend_ring_dedup_closing, validate_offsets},
+    polygon::{Polygon, PolygonRef, PolygonView},
+};
+
+#[cfg(feature = "serde")]
+use super::offsets::offsets_from_lengths;
 
 /// Computer-friendly MultiPolygon
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct MultiPolygon<'a, T: Coord> {
+#[derive(Debug, Clone, PartialEq)]
+pub struct MultiPolygon<T: Coord> {
     /// All coordinates of all polygons
     ///
     /// e.g. `[x0, y0, z0, x1, y1, z1, ...]`
-    all_coords: Cow<'a, [T]>,
+    coords: Vec<T>,
 
-    /// A sequence of indices of all_coords from which each polygon starts
-    /// (the first polygon always starts from 0 so it is omitted)
-    coords_spans: Cow<'a, [u32]>,
+    /// A sequence of offsets into coords from which each ring starts.
+    ///
+    /// The first offset is always 0, and the last offset is always coords.len().
+    ring_offsets: Vec<u32>,
 
-    /// All hole_indices (See `Polygon`) of all polygons
-    all_hole_indices: Cow<'a, [u32]>,
-
-    /// A sequence of indices of all_hole_indices from which each polygon starts
-    /// (the first polygon always starts from 0 so it is omitted)
-    holes_spans: Cow<'a, [u32]>,
+    /// A sequence of offsets into ring_offsets from which each polygon starts.
+    ///
+    /// The first offset is always 0, and the last offset is always the ring count.
+    polygon_offsets: Vec<u32>,
 }
 
-pub type MultiPolygon2<'a, C = f64> = MultiPolygon<'a, [C; 2]>;
-pub type MultiPolygon3<'a, C = f64> = MultiPolygon<'a, [C; 3]>;
+pub type MultiPolygon2<C = f64> = MultiPolygon<[C; 2]>;
+pub type MultiPolygon3<C = f64> = MultiPolygon<[C; 3]>;
 
-impl<'a, T: Coord> MultiPolygon<'a, T> {
-    /// Creates an empty MultiPolygon.
-    pub fn new() -> Self {
+/// Read-only borrowed view of a MultiPolygon.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MultiPolygonView<'a, T: Coord> {
+    coords: &'a [T],
+    ring_offsets: &'a [u32],
+    polygon_offsets: &'a [u32],
+}
+
+pub type MultiPolygonView2<'a, C = f64> = MultiPolygonView<'a, [C; 2]>;
+pub type MultiPolygonView3<'a, C = f64> = MultiPolygonView<'a, [C; 3]>;
+
+/// Read-only abstraction over [`MultiPolygon`] and [`MultiPolygonView`].
+pub trait MultiPolygonRef<T: Coord> {
+    fn coords(&self) -> &[T];
+    fn ring_offsets(&self) -> &[u32];
+    fn polygon_offsets(&self) -> &[u32];
+
+    fn raw_coords(&self) -> &[T] {
+        let polygon_offsets = self.polygon_offsets();
+        let ring_offsets = self.ring_offsets();
+        let Some(&polygon_start) = polygon_offsets.first() else {
+            return &[];
+        };
+        let Some(&polygon_end) = polygon_offsets.last() else {
+            return &[];
+        };
+        let start = ring_offsets
+            .get(polygon_start as usize)
+            .copied()
+            .unwrap_or(0);
+        let end = ring_offsets.get(polygon_end as usize).copied().unwrap_or(0);
+        &self.coords()[start as usize..end as usize]
+    }
+    /// Returns per-polygon ring counts, derived as deltas of consecutive polygon offsets.
+    fn polygon_ring_counts(&self) -> impl Clone + ExactSizeIterator<Item = u32> + '_ {
+        self.polygon_offsets()
+            .windows(2)
+            .map(|window| window[1] - window[0])
+    }
+    /// Returns ring vertex counts for this multipolygon, derived as deltas of ring offsets.
+    fn ring_lengths(&self) -> impl Clone + ExactSizeIterator<Item = u32> + '_ {
+        let empty = &[];
+        let polygon_offsets = self.polygon_offsets();
+        let ring_offsets = self.ring_offsets();
+        let offsets = match (polygon_offsets.first(), polygon_offsets.last()) {
+            (Some(&start), Some(&end)) => ring_offsets
+                .get(start as usize..=end as usize)
+                .unwrap_or(empty),
+            _ => empty,
+        };
+        offsets.windows(2).map(|window| window[1] - window[0])
+    }
+    fn len(&self) -> usize {
+        self.polygon_offsets().len().saturating_sub(1)
+    }
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    fn iter<'a>(&'a self) -> Iter<'a, T>
+    where
+        T: 'a,
+    {
+        let r_prev = self.polygon_offsets().first().copied().unwrap_or(0);
+        Iter {
+            coords: self.coords(),
+            ring_offsets: self.ring_offsets(),
+            polygon_offsets: self.polygon_offsets(),
+            pos: 0,
+            end: self.len(),
+            r_prev,
+        }
+    }
+    fn iter_range<'a>(&'a self, range: Range<usize>) -> Iter<'a, T>
+    where
+        T: 'a,
+    {
+        let r_prev = self
+            .polygon_offsets()
+            .get(range.start)
+            .copied()
+            .unwrap_or(0);
+        Iter {
+            coords: self.coords(),
+            ring_offsets: self.ring_offsets(),
+            polygon_offsets: self.polygon_offsets(),
+            pos: range.start,
+            end: range.end,
+            r_prev,
+        }
+    }
+    fn get(&self, index: usize) -> PolygonView<'_, T> {
+        let len = self.len();
+        if index >= len {
+            panic!(
+                "index out of bounds: {} polygon(s) but index is {}",
+                len, index
+            );
+        }
+        let polygon_offsets = self.polygon_offsets();
+        let r_start = polygon_offsets[index] as usize;
+        let r_end = polygon_offsets[index + 1] as usize;
+        PolygonView::from_raw(self.coords(), &self.ring_offsets()[r_start..=r_end])
+    }
+}
+
+impl<T: Coord> MultiPolygonRef<T> for MultiPolygon<T> {
+    fn coords(&self) -> &[T] {
+        &self.coords
+    }
+    fn ring_offsets(&self) -> &[u32] {
+        &self.ring_offsets
+    }
+    fn polygon_offsets(&self) -> &[u32] {
+        &self.polygon_offsets
+    }
+}
+
+impl<T: Coord> MultiPolygonRef<T> for MultiPolygonView<'_, T> {
+    fn coords(&self) -> &[T] {
+        self.coords
+    }
+    fn ring_offsets(&self) -> &[u32] {
+        self.ring_offsets
+    }
+    fn polygon_offsets(&self) -> &[u32] {
+        self.polygon_offsets
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<T> serde::Serialize for MultiPolygon<T>
+where
+    T: Coord + serde::Serialize,
+{
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serialize_multi_polygon(self, serializer)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<T> serde::Serialize for MultiPolygonView<'_, T>
+where
+    T: Coord + serde::Serialize,
+{
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serialize_multi_polygon(self, serializer)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de, T> serde::Deserialize<'de> for MultiPolygon<T>
+where
+    T: Coord + serde::Deserialize<'de>,
+{
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        struct MultiPolygonSerde<T> {
+            coords: Vec<T>,
+            topology: Vec<u32>,
+        }
+
+        let value = MultiPolygonSerde::deserialize(deserializer)?;
+        let (ring_offsets, polygon_offsets) =
+            offsets_from_topology::<D::Error>(&value.topology, value.coords.len())?;
+        Ok(MultiPolygon::from_raw_unchecked(
+            value.coords,
+            ring_offsets,
+            polygon_offsets,
+        ))
+    }
+}
+
+#[cfg(feature = "serde")]
+fn serialize_multi_polygon<T, M, S>(multi_polygon: &M, serializer: S) -> Result<S::Ok, S::Error>
+where
+    T: Coord + serde::Serialize,
+    M: MultiPolygonRef<T> + ?Sized,
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeStruct;
+
+    let mut s = serializer.serialize_struct("MultiPolygon", 2)?;
+    s.serialize_field("coords", multi_polygon.raw_coords())?;
+    s.serialize_field(
+        "topology",
+        &MultiPolygonTopology {
+            polygon_count: multi_polygon.len(),
+            polygon_ring_counts: multi_polygon.polygon_ring_counts(),
+            ring_lengths: multi_polygon.ring_lengths(),
+        },
+    )?;
+    s.end()
+}
+
+#[cfg(feature = "serde")]
+struct MultiPolygonTopology<P, R> {
+    polygon_count: usize,
+    polygon_ring_counts: P,
+    ring_lengths: R,
+}
+
+#[cfg(feature = "serde")]
+impl<P, R> serde::Serialize for MultiPolygonTopology<P, R>
+where
+    P: Clone + ExactSizeIterator<Item = u32>,
+    R: Clone + ExactSizeIterator<Item = u32>,
+{
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+
+        let polygon_ring_counts = self.polygon_ring_counts.clone();
+        let ring_lengths = self.ring_lengths.clone();
+        let mut seq =
+            serializer.serialize_seq(Some(1 + polygon_ring_counts.len() + ring_lengths.len()))?;
+
+        seq.serialize_element(&(self.polygon_count as u32))?;
+        for count in polygon_ring_counts {
+            seq.serialize_element(&count)?;
+        }
+        for len in ring_lengths {
+            seq.serialize_element(&len)?;
+        }
+        seq.end()
+    }
+}
+
+#[cfg(feature = "serde")]
+fn offsets_from_topology<E: serde::de::Error>(
+    topology: &[u32],
+    coord_len: usize,
+) -> Result<(Vec<u32>, Vec<u32>), E> {
+    if topology.is_empty() {
+        return Err(E::custom("topology must contain polygon count"));
+    }
+
+    let polygon_count = topology[0] as usize;
+    if topology.len() < 1 + polygon_count {
+        return Err(E::custom("topology is shorter than polygon ring counts"));
+    }
+
+    let ring_counts = &topology[1..1 + polygon_count];
+    let total_rings = checked_sum::<E>(ring_counts, "polygon ring counts")? as usize;
+    if topology.len() != 1 + polygon_count + total_rings {
+        return Err(E::custom("topology length does not match ring counts"));
+    }
+
+    let ring_lengths = &topology[1 + polygon_count..];
+    let ring_offsets = offsets_from_lengths::<E>(ring_lengths, coord_len, "ring lengths")?;
+    let polygon_offsets =
+        offsets_from_lengths::<E>(ring_counts, total_rings, "polygon ring counts")?;
+    Ok((ring_offsets, polygon_offsets))
+}
+
+#[cfg(feature = "serde")]
+fn checked_sum<E: serde::de::Error>(values: &[u32], name: &str) -> Result<u32, E> {
+    let mut acc = 0_u32;
+    for &value in values {
+        acc = acc
+            .checked_add(value)
+            .ok_or_else(|| E::custom(format_args!("{name} overflow")))?;
+    }
+    Ok(acc)
+}
+
+impl<'a, T: Coord> MultiPolygonView<'a, T> {
+    pub const fn from_raw(
+        coords: &'a [T],
+        ring_offsets: &'a [u32],
+        polygon_offsets: &'a [u32],
+    ) -> Self {
         Self {
-            all_coords: Cow::Borrowed(&[]),
-            coords_spans: Cow::Borrowed(&[]),
-            all_hole_indices: Cow::Borrowed(&[]),
-            holes_spans: Cow::Borrowed(&[]),
+            coords,
+            ring_offsets,
+            polygon_offsets,
         }
     }
 
-    /// Create a new polygon from the given raw data, checking for validity.
-    pub fn from_raw(
-        all_coords: Cow<'a, [T]>,
-        coords_spans: Cow<'a, [u32]>,
-        all_hole_indices: Cow<'a, [u32]>,
-        holes_spans: Cow<'a, [u32]>,
-    ) -> Self {
-        if coords_spans.len() != holes_spans.len() {
-            panic!("coords_spans and holes_spans must have the same length");
+    /// Materializes a self-contained owned `MultiPolygon` (rebases both
+    /// `polygon_offsets` and `ring_offsets` to 0-based and copies just this
+    /// multi's coords).
+    pub fn to_owned(&self) -> MultiPolygon<T> {
+        let po = self.polygon_offsets;
+        let ro = self.ring_offsets;
+        if po.len() < 2 {
+            return MultiPolygon::new();
         }
-
-        // check multipolygon
-        let mut cs_start = 0;
-        let mut hs_start = 0;
-        coords_spans
+        let p_base = po.first().copied().unwrap_or(0);
+        let p_last = po.last().copied().unwrap_or(0);
+        let r_start = ro.get(p_base as usize).copied().unwrap_or(0);
+        let r_end = ro.get(p_last as usize).copied().unwrap_or(0);
+        let coords = self.coords[r_start as usize..r_end as usize].to_vec();
+        let ring_offsets: Vec<u32> = ro[p_base as usize..=p_last as usize]
             .iter()
-            .zip(holes_spans.iter())
-            .chain(Some((
-                &((all_coords.len()) as u32),
-                &((all_hole_indices.len()) as u32),
-            )))
-            .for_each(|(&cs_end, &hs_end)| {
-                if cs_start > cs_end {
-                    panic!("invalid coords_spans");
-                }
-                if hs_start > hs_end {
-                    panic!("invalid holes_spans");
-                }
-                // check polygon
-                let coords = &all_coords[cs_start as usize..cs_end as usize];
-                let hole_indices = &all_hole_indices[hs_start as usize..hs_end as usize];
-                if let Some(&last) = hole_indices.last() {
-                    let len = (coords.len()) as u32;
-                    if last >= len || hole_indices.windows(2).any(|a| a[0] >= a[1]) {
-                        panic!("invalid hole_indices")
-                    }
-                }
-                (cs_start, hs_start) = (cs_end, hs_end);
-            });
+            .map(|o| o - r_start)
+            .collect();
+        let polygon_offsets: Vec<u32> = po.iter().map(|o| o - p_base).collect();
+        MultiPolygon::from_raw_unchecked(coords, ring_offsets, polygon_offsets)
+    }
+}
+
+impl<T: Coord> Default for MultiPolygon<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T: Coord> MultiPolygon<T> {
+    /// Creates an empty MultiPolygon.
+    pub fn new() -> Self {
+        Self {
+            coords: Vec::new(),
+            ring_offsets: vec![0],
+            polygon_offsets: vec![0],
+        }
+    }
+
+    /// Create a new multipolygon from the given raw data, checking for validity.
+    pub fn from_raw(coords: Vec<T>, ring_offsets: Vec<u32>, polygon_offsets: Vec<u32>) -> Self {
+        validate_offsets(coords.len(), &ring_offsets, "ring_offsets");
+        validate_offsets(ring_offsets.len() - 1, &polygon_offsets, "polygon_offsets");
 
         Self {
-            all_coords,
-            coords_spans,
-            holes_spans,
-            all_hole_indices,
+            coords,
+            ring_offsets,
+            polygon_offsets,
         }
     }
 
     /// Creates a new multipolygon from the given raw data, without validity check.
     pub fn from_raw_unchecked(
-        all_coords: Cow<'a, [T]>,
-        coords_spans: Cow<'a, [u32]>,
-        holes_spans: Cow<'a, [u32]>,
-        all_hole_indices: Cow<'a, [u32]>,
+        coords: Vec<T>,
+        ring_offsets: Vec<u32>,
+        polygon_offsets: Vec<u32>,
     ) -> Self {
         Self {
-            all_coords,
-            coords_spans,
-            holes_spans,
-            all_hole_indices,
+            coords,
+            ring_offsets,
+            polygon_offsets,
         }
-    }
-
-    /// Returns the number of polygons in the multipolygon.
-    pub fn len(&self) -> usize {
-        match self.coords_spans.len() {
-            0 => match self.all_coords.len() {
-                0 => 0,
-                _ => 1,
-            },
-            len => len + 1,
-        }
-    }
-
-    /// Returns `true` if the multipolygon contains no polygons.
-    pub fn is_empty(&self) -> bool {
-        self.all_coords.is_empty()
-    }
-
-    /// Returns an iterator over the polygons
-    pub fn iter(&self) -> Iter<T> {
-        Iter {
-            mpoly: self,
-            pos: 0,
-            end: self.len(),
-        }
-    }
-
-    /// Returns an iterator over the polygons in the given range.
-    pub fn iter_range(&self, range: Range<usize>) -> Iter<T> {
-        Iter {
-            mpoly: self,
-            pos: range.start,
-            end: range.end,
-        }
-    }
-
-    /// Returns the polygon at the given index.
-    pub fn get(&'a self, index: usize) -> Polygon<'a, T> {
-        let len = self.len();
-        let (c_start, c_end, h_start, h_end) = match index {
-            index if index >= len => {
-                panic!(
-                    "index out of bounds: {} polygon(s) but index is {}",
-                    len, index
-                );
-            }
-            0 => (
-                0,
-                self.coords_spans
-                    .first()
-                    .map_or(self.all_coords.len(), |&i| i as usize),
-                0,
-                self.holes_spans
-                    .first()
-                    .map_or(self.all_hole_indices.len(), |&i| i as usize),
-            ),
-            index if index == len - 1 => (
-                self.coords_spans[index - 1] as usize,
-                self.all_coords.len(),
-                self.holes_spans[index - 1] as usize,
-                self.all_hole_indices.len(),
-            ),
-            _ => (
-                self.coords_spans[index - 1] as usize,
-                self.coords_spans[index] as usize,
-                self.holes_spans[index - 1] as usize,
-                self.holes_spans[index] as usize,
-            ),
-        };
-        Polygon::from_raw_unchecked(
-            (&self.all_coords[c_start..c_end]).into(),
-            (&self.all_hole_indices[h_start..h_end]).into(),
-        )
     }
 
     /// Clears the multipolygon, removing all polygons.
     pub fn clear(&mut self) {
-        self.all_coords.to_mut().clear();
-        self.all_hole_indices.to_mut().clear();
-        self.coords_spans.to_mut().clear();
-        self.holes_spans.to_mut().clear();
+        self.coords.clear();
+        self.ring_offsets.clear();
+        self.ring_offsets.push(0);
+        self.polygon_offsets.clear();
+        self.polygon_offsets.push(0);
     }
 
     /// Adds a polygon to the multipolygon.
@@ -192,92 +393,108 @@ impl<'a, T: Coord> MultiPolygon<'a, T> {
 
     /// Adds a polygon with the given exterior ring.
     pub fn add_exterior<I: IntoIterator<Item = T>>(&mut self, iter: I) {
-        if !self.all_coords.is_empty() {
-            self.coords_spans
-                .to_mut()
-                .push((self.all_coords.len()) as u32);
-            self.holes_spans
-                .to_mut()
-                .push(self.all_hole_indices.len() as u32);
-        }
-
-        let head = self.all_coords.len();
-        self.all_coords.to_mut().extend(iter);
-
-        // remove closing point if exists
-        let tail = self.all_coords.len();
-        if tail > head + 2 && self.all_coords[head..head + 1] == self.all_coords[tail - 1..] {
-            self.all_coords.to_mut().truncate(tail - 1);
-        }
+        self.add_ring(iter);
+        self.polygon_offsets
+            .push((self.ring_offsets.len() - 1) as u32);
     }
 
     /// Adds an interior ring to the last polygon.
     pub fn add_interior<I: IntoIterator<Item = T>>(&mut self, iter: I) {
-        self.all_hole_indices
-            .to_mut()
-            .push((self.all_coords.len()) as u32 - *self.coords_spans.last().unwrap_or(&0));
-
-        let head = self.all_coords.len();
-        self.all_coords.to_mut().extend(iter);
-
-        // remove closing point if exists
-        let tail = self.all_coords.len();
-        if tail > head + 2 && self.all_coords[head..head + 1] == self.all_coords[tail - 1..] {
-            self.all_coords.to_mut().truncate(tail - 1);
+        if self.is_empty() {
+            self.add_ring(core::iter::empty());
+        } else {
+            self.polygon_offsets.pop();
         }
+        self.add_ring(iter);
+        self.polygon_offsets
+            .push((self.ring_offsets.len() - 1) as u32);
     }
 
     /// Create a new MultiPolygon by applying the given transformation to all coordinates.
     pub fn transform<T2: Coord>(&self, f: impl Fn(&T) -> T2) -> MultiPolygon<T2> {
         MultiPolygon {
-            all_coords: self.all_coords.iter().map(f).collect(),
-            coords_spans: self.coords_spans.clone(),
-            all_hole_indices: self.all_hole_indices.clone(),
-            holes_spans: self.holes_spans.clone(),
+            coords: self.coords.iter().map(f).collect(),
+            ring_offsets: self.ring_offsets.clone(),
+            polygon_offsets: self.polygon_offsets.clone(),
         }
     }
 
     /// Applies the given transformation to all coordinates in the MultiPolygon.
     pub fn transform_inplace(&mut self, mut f: impl FnMut(&T) -> T) {
-        self.all_coords.to_mut().iter_mut().for_each(|c| {
+        self.coords.iter_mut().for_each(|c| {
             *c = f(c);
         });
     }
-}
 
-impl<'a, T: Coord> IntoIterator for &'a MultiPolygon<'_, T> {
-    type Item = Polygon<'a, T>;
-    type IntoIter = Iter<'a, T>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.iter()
+    fn add_ring<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        extend_ring_dedup_closing(&mut self.coords, &mut self.ring_offsets, iter);
     }
 }
 
-pub struct Iter<'a, T: Coord> {
-    mpoly: &'a MultiPolygon<'a, T>,
-    pos: usize,
-    end: usize,
+impl<'a, T: Coord> IntoIterator for &'a MultiPolygon<T> {
+    type Item = PolygonView<'a, T>;
+    type IntoIter = Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        <MultiPolygon<T> as MultiPolygonRef<T>>::iter(self)
+    }
 }
 
-impl<'a, T: Coord> Iterator for Iter<'a, T> {
-    type Item = Polygon<'a, T>;
+impl<'a, T: Coord> IntoIterator for &MultiPolygonView<'a, T> {
+    type Item = PolygonView<'a, T>;
+    type IntoIter = Iter<'a, T>;
 
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.pos < self.end {
-            // TODO: optimize
-            let poly = self.mpoly.get(self.pos);
-            self.pos += 1;
-            Some(poly)
-        } else {
-            None
+    fn into_iter(self) -> Self::IntoIter {
+        let r_prev = self.polygon_offsets.first().copied().unwrap_or(0);
+        Iter {
+            coords: self.coords,
+            ring_offsets: self.ring_offsets,
+            polygon_offsets: self.polygon_offsets,
+            pos: 0,
+            end: self.polygon_offsets.len().saturating_sub(1),
+            r_prev,
         }
     }
 }
 
+pub struct Iter<'a, T: Coord> {
+    coords: &'a [T],
+    ring_offsets: &'a [u32],
+    polygon_offsets: &'a [u32],
+    pos: usize,
+    end: usize,
+    r_prev: u32,
+}
+
+impl<'a, T: Coord> Iterator for Iter<'a, T> {
+    type Item = PolygonView<'a, T>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos >= self.end {
+            return None;
+        }
+        let r_next = self.polygon_offsets[self.pos + 1];
+        let view = PolygonView::from_raw(
+            self.coords,
+            &self.ring_offsets[self.r_prev as usize..=r_next as usize],
+        );
+        self.r_prev = r_next;
+        self.pos += 1;
+        Some(view)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let n = self.end.saturating_sub(self.pos);
+        (n, Some(n))
+    }
+}
+
+impl<'a, T: Coord> ExactSizeIterator for Iter<'a, T> {}
+
 #[cfg(test)]
 mod tests {
     use super::{super::polygon::Polygon2, *};
+    use crate::geometry::linestring::LineStringRef;
     use alloc::vec::Vec;
 
     #[test]
@@ -470,11 +687,10 @@ mod tests {
                 [6.0, 1.0],
                 [6.0, 2.0],
                 [5.0, 2.0],
-            ][..]
-                .into(),
-            [12, 20][..].into(),
-            [4, 8, 4, 4][..].into(),
-            [2, 3][..].into(),
+            ]
+            .to_vec(),
+            [0, 4, 8, 12, 16, 20, 24, 28].to_vec(),
+            [0, 3, 5, 7].to_vec(),
         );
 
         // unchecked
@@ -508,11 +724,10 @@ mod tests {
                 [6.0, 1.0],
                 [6.0, 2.0],
                 [5.0, 2.0],
-            ][..]
-                .into(),
-            [12, 20][..].into(),
-            [4, 8, 4, 4][..].into(),
-            [2, 3][..].into(),
+            ]
+            .to_vec(),
+            [0, 4, 8, 12, 16, 20, 24, 28].to_vec(),
+            [0, 3, 5, 7].to_vec(),
         );
     }
 
@@ -543,10 +758,9 @@ mod tests {
     #[should_panic]
     fn test_from_raw_invalid_1() {
         let _mpoly = MultiPolygon2::from_raw(
-            [[0.0, 0.0], [5.0, 0.0], [5.0, 5.0], [0.0, 1.0]][..].into(),
-            [2][..].into(),
-            [1, 99][..].into(), // invalid
-            [1][..].into(),
+            [[0.0, 0.0], [5.0, 0.0], [5.0, 5.0], [0.0, 1.0]].to_vec(),
+            [0, 1, 99].to_vec(), // invalid
+            [0, 2].to_vec(),
         );
     }
 
@@ -554,10 +768,9 @@ mod tests {
     #[should_panic]
     fn test_from_raw_invalid_2() {
         let _mpoly = MultiPolygon2::from_raw(
-            [[0.0, 0.0], [5.0, 0.0], [5.0, 5.0], [0.0, 1.0]][..].into(),
-            [99][..].into(), // invalid
-            [1, 1][..].into(),
-            [1][..].into(),
+            [[0.0, 0.0], [5.0, 0.0], [5.0, 5.0], [0.0, 1.0]].to_vec(),
+            [0, 4].to_vec(),
+            [0, 99].to_vec(), // invalid
         );
     }
 
@@ -565,10 +778,9 @@ mod tests {
     #[should_panic]
     fn test_from_raw_invalid_3() {
         let _mpoly = MultiPolygon2::from_raw(
-            [[0.0, 0.0], [5.0, 0.0], [5.0, 5.0], [0.0, 1.0]][..].into(),
-            [2][..].into(),
-            [1, 1][..].into(),
-            [99][..].into(), // invalid
+            [[0.0, 0.0], [5.0, 0.0], [5.0, 5.0], [0.0, 1.0]].to_vec(),
+            [1, 4].to_vec(), // invalid
+            [0, 1].to_vec(),
         );
     }
 
@@ -577,10 +789,9 @@ mod tests {
     fn test_from_raw_invalid_4() {
         // checked
         let _mpoly = MultiPolygon2::from_raw(
-            [[0.0, 0.0], [5.0, 0.0], [5.0, 5.0], [0.0, 1.0]][..].into(),
-            [1, 2][..].into(),
-            [][..].into(),
-            [0][..].into(), // coords_spans.len() != holes_spans.len()
+            [[0.0, 0.0], [5.0, 0.0], [5.0, 5.0], [0.0, 1.0]].to_vec(),
+            [].to_vec(), // missing sentinel
+            [0].to_vec(),
         );
     }
 
@@ -589,10 +800,9 @@ mod tests {
     fn test_from_raw_invalid_5() {
         // checked
         let _mpoly = MultiPolygon2::from_raw(
-            [[0.0, 0.0], [5.0, 0.0], [5.0, 5.0], [0.0, 1.0]][..].into(),
-            [2, 1][..].into(), // not increasing
-            [][..].into(),
-            [0, 0][..].into(),
+            [[0.0, 0.0], [5.0, 0.0], [5.0, 5.0], [0.0, 1.0]].to_vec(),
+            [0, 3, 2, 4].to_vec(), // not increasing
+            [0, 3].to_vec(),
         );
     }
 
@@ -601,10 +811,9 @@ mod tests {
     fn test_from_raw_invalid_6() {
         // checked
         let _mpoly = MultiPolygon2::from_raw(
-            [[0., 0.], [1., 1.], [2., 2.], [3., 3.], [4., 4.], [5., 5.]][..].into(),
-            [2, 4][..].into(),
-            [1, 1][..].into(),
-            [1, 0][..].into(), // not increasing
+            [[0., 0.], [1., 1.], [2., 2.], [3., 3.], [4., 4.], [5., 5.]].to_vec(),
+            [0, 2, 4, 6].to_vec(),
+            [0, 3, 1].to_vec(), // not increasing
         );
     }
 }

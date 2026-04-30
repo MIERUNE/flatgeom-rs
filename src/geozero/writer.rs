@@ -1,14 +1,17 @@
 use alloc::vec::Vec;
 
-use geozero::error::Result;
 use geozero::GeomProcessor;
+use geozero::error::Result;
 
-use crate::{Geometry, LineString, MultiLineString, MultiPoint, MultiPolygon, Polygon};
+use crate::{
+    Geometry, GeometryCollection, LineString, MultiLineString, MultiPoint, MultiPolygon, Point,
+    Polygon,
+};
 
 pub struct FlatgeomWriter<const D: usize> {
-    geoms: Vec<Geometry<'static, [f64; D]>>,
-    collections: Vec<Vec<Geometry<'static, [f64; D]>>>, // stack of GeometryCollection (nested)
-    current: Option<Geometry<'static, [f64; D]>>,
+    geoms: Vec<Geometry<[f64; D]>>,
+    collections: Vec<Vec<Geometry<[f64; D]>>>, // stack of GeometryCollection (nested)
+    current: Option<Geometry<[f64; D]>>,
     coords: Vec<[f64; D]>,
 }
 
@@ -25,11 +28,13 @@ impl<const D: usize> FlatgeomWriter<D> {
         }
     }
 
-    pub fn take_geometry(mut self) -> Option<Geometry<'static, [f64; D]>> {
+    pub fn take_geometry(mut self) -> Option<Geometry<[f64; D]>> {
         match self.geoms.len() {
             0 => None,
             1 => Some(self.geoms.pop().unwrap()),
-            _ => Some(Geometry::GeometryCollection(self.geoms)),
+            _ => Some(Geometry::GeometryCollection(GeometryCollection::from_vec(
+                self.geoms,
+            ))),
         }
     }
 }
@@ -41,10 +46,10 @@ impl<const D: usize> Default for FlatgeomWriter<D> {
 }
 
 impl<const D: usize> FlatgeomWriter<D> {
-    fn start_geometry(&mut self, geom: Geometry<'static, [f64; D]>) {
+    fn start_geometry(&mut self, geom: Geometry<[f64; D]>) {
         match geom {
-            Geometry::GeometryCollection(geoms) => {
-                self.collections.push(geoms);
+            Geometry::GeometryCollection(gc) => {
+                self.collections.push(gc.0);
             }
             geom => {
                 self.current = Some(geom);
@@ -54,8 +59,13 @@ impl<const D: usize> FlatgeomWriter<D> {
 
     fn finish_coords(&mut self, idx: usize) {
         if let Some(geom) = self.current.as_mut() {
-            let iter = self.coords.iter().copied();
+            let mut iter = self.coords.iter().copied();
             match geom {
+                Geometry::Point(p) => {
+                    if let Some(c) = iter.next() {
+                        *p = Point::new(c);
+                    }
+                }
                 Geometry::MultiPoint(mp) => mp.extend(iter),
                 Geometry::LineString(ls) => ls.extend(iter),
                 Geometry::MultiLineString(mls) => mls.add_linestring(iter),
@@ -108,17 +118,17 @@ impl<const D: usize> GeomProcessor for FlatgeomWriter<D> {
         let mut coord = [0.; D];
         coord[0] = x;
         coord[1] = y;
-        if D >= 3 {
-            if let Some(z) = z {
-                coord[2] = z;
-            }
+        if D >= 3
+            && let Some(z) = z
+        {
+            coord[2] = z;
         }
         self.coords.push(coord);
         Ok(())
     }
 
     fn geometrycollection_begin(&mut self, _size: usize, _idx: usize) -> Result<()> {
-        self.start_geometry(Geometry::GeometryCollection(Vec::new()));
+        self.start_geometry(Geometry::GeometryCollection(GeometryCollection::new()));
         Ok(())
     }
 
@@ -126,7 +136,20 @@ impl<const D: usize> GeomProcessor for FlatgeomWriter<D> {
         let Some(collection) = self.collections.pop() else {
             panic!("collection stack underflow");
         };
-        self.current = Some(Geometry::GeometryCollection(collection));
+        self.current = Some(Geometry::GeometryCollection(GeometryCollection::from_vec(
+            collection,
+        )));
+        self.finish_geometry();
+        Ok(())
+    }
+
+    fn point_begin(&mut self, _idx: usize) -> Result<()> {
+        self.start_geometry(Geometry::Point(Point::new([0.; D])));
+        Ok(())
+    }
+
+    fn point_end(&mut self, idx: usize) -> Result<()> {
+        self.finish_coords(idx);
         self.finish_geometry();
         Ok(())
     }

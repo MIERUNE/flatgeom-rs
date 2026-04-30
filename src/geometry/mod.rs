@@ -1,21 +1,50 @@
-use alloc::vec::Vec;
-
+#[allow(clippy::module_inception)]
+mod geometry;
+mod geometry_collection;
 mod linestring;
 mod multi_linestring;
 mod multi_point;
 mod multi_polygon;
+mod offsets;
+mod point;
 mod polygon;
 
-pub use linestring::{LineString, LineString2, LineString3};
-pub use multi_linestring::{MultiLineString, MultiLineString2, MultiLineString3};
-pub use multi_point::{MultiPoint, MultiPoint2, MultiPoint3};
-pub use multi_polygon::{MultiPolygon, MultiPolygon2, MultiPolygon3};
-pub use polygon::{Polygon, Polygon2, Polygon3};
+pub use geometry::{Geometry, Geometry2, Geometry3};
+pub use geometry_collection::{
+    GeometryCollection, GeometryCollection2, GeometryCollection3, GeometryCollectionRef,
+};
+pub use linestring::{
+    LineString, LineString2, LineString3, LineStringRef, LineStringView, LineStringView2,
+    LineStringView3,
+};
+pub use multi_linestring::{
+    MultiLineString, MultiLineString2, MultiLineString3, MultiLineStringRef, MultiLineStringView,
+    MultiLineStringView2, MultiLineStringView3,
+};
+pub use multi_point::{
+    MultiPoint, MultiPoint2, MultiPoint3, MultiPointRef, MultiPointView, MultiPointView2,
+    MultiPointView3,
+};
+pub use multi_polygon::{
+    MultiPolygon, MultiPolygon2, MultiPolygon3, MultiPolygonRef, MultiPolygonView,
+    MultiPolygonView2, MultiPolygonView3,
+};
+pub use point::{Point, Point2, Point3, PointRef, PointView, PointView2, PointView3};
+pub use polygon::{
+    Polygon, Polygon2, Polygon3, PolygonRef, PolygonView, PolygonView2, PolygonView3,
+};
 
-use num_traits::ToPrimitive;
+use core::fmt::Debug;
 
-pub trait Coord: Clone + PartialEq {}
-pub trait CoordNum: ToPrimitive + PartialEq + Clone {}
+use num_traits::{Num, NumCast};
+
+pub trait Coord: Copy + PartialEq {}
+/// Numeric type usable as a coordinate component.
+///
+/// Bounds are aligned with [`geo_types::CoordNum`] (`Num + Copy + NumCast +
+/// PartialOrd + Debug`) so that flatgeom geometries integrate transparently
+/// with `geo-traits` ↔ `geo-types` conversion helpers.
+pub trait CoordNum: Num + Copy + NumCast + PartialOrd + Debug {}
 
 impl<const D: usize, N: CoordNum> Coord for [N; D] {}
 impl<N: CoordNum> Coord for N {}
@@ -40,29 +69,6 @@ impl<N: CoordNum> Coord2d for [N; 2] {
     }
 }
 
-/// Computer-friendly Geometry
-#[cfg_attr(
-    feature = "serde",
-    derive(serde::Serialize, serde::Deserialize),
-    serde(tag = "type")
-)]
-#[derive(Debug, Clone)]
-pub enum Geometry<'a, T: Coord> {
-    // Point?
-    MultiPoint(MultiPoint<'a, T>),
-    // Line?
-    LineString(LineString<'a, T>),
-    MultiLineString(MultiLineString<'a, T>),
-    Polygon(Polygon<'a, T>),
-    MultiPolygon(MultiPolygon<'a, T>),
-    // Triangle?
-    // TIN?
-    GeometryCollection(Vec<Geometry<'a, T>>),
-}
-
-pub type Geometry2<'a, C = f64> = Geometry<'a, [C; 2]>;
-pub type Geometry3<'a, C = f64> = Geometry<'a, [C; 3]>;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -71,10 +77,10 @@ mod tests {
     #[test]
     fn test_coord_num_trait() {
         // 2D LineString with floating point numbers
-        let a: LineString2<f32> = LineString::from_raw(vec![[1.2, 2.3], [3.4, 4.5]].into());
+        let a: LineString2<f32> = LineString::from_raw(vec![[1.2, 2.3], [3.4, 4.5]]);
         assert_eq!(a.len(), 2);
         // Can also be used to store integer values (e.g., vertex indices)
-        let b: LineString<u32> = LineString::from_raw(vec![1, 2, 3].into());
+        let b: LineString<u32> = LineString::from_raw(vec![1, 2, 3]);
         assert_eq!(b.len(), 3);
     }
 
@@ -83,8 +89,7 @@ mod tests {
         let v = [1, 2];
         assert_eq!(v.xy(), (1.0, 2.0));
 
-        let a: LineString2<f32> =
-            LineString::from_raw(vec![[0.0, 0.0], [1.0, 1.0], [-2.0, 3.0]].into());
+        let a: LineString2<f32> = LineString::from_raw(vec![[0.0, 0.0], [1.0, 1.0], [-2.0, 3.0]]);
         assert_eq!(a.ring_area(), 2.5);
     }
 }

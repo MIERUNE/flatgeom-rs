@@ -1,165 +1,309 @@
-use alloc::borrow::Cow;
+use alloc::vec;
+use alloc::vec::Vec;
 use core::ops::Range;
 
-use super::{linestring::LineString, Coord};
+use super::{
+    Coord,
+    linestring::LineStringView,
+    offsets::{rebase_offsets, validate_offsets},
+};
+
+#[cfg(feature = "serde")]
+use super::offsets::{OffsetLengths, offsets_from_lengths};
 
 /// Computer-friendly MultiString
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct MultiLineString<'a, T: Coord> {
+#[derive(Debug, Clone, PartialEq)]
+pub struct MultiLineString<T: Coord> {
     /// All coordinates of all LineStrings
     ///
     /// e.g. `[x0, y0, z0, x1, y1, z1, ...]`
-    all_coords: Cow<'a, [T]>,
+    coords: Vec<T>,
 
-    /// A sequence of indices of all_coords from which each linestring starts
-    /// (the first linestring always starts from 0 so it is omitted)
+    /// A sequence of offsets into coords from which each LineString starts.
     ///
-    /// e.g. `[5, 12, 23]`
-    coords_spans: Cow<'a, [u32]>,
+    /// The first offset is always 0, and the last offset is always coords.len().
+    line_offsets: Vec<u32>,
 }
 
-pub type MultiLineString2<'a, C = f64> = MultiLineString<'a, [C; 2]>;
-pub type MultiLineString3<'a, C = f64> = MultiLineString<'a, [C; 3]>;
+pub type MultiLineString2<C = f64> = MultiLineString<[C; 2]>;
+pub type MultiLineString3<C = f64> = MultiLineString<[C; 3]>;
 
-impl<'a, T: Coord> MultiLineString<'a, T> {
-    /// Creates an empty MultiLineString.
-    pub fn new() -> Self {
-        Self {
-            all_coords: Cow::Borrowed(&[]),
-            coords_spans: Cow::Borrowed(&[]),
+/// Read-only borrowed view of a MultiLineString.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MultiLineStringView<'a, T: Coord> {
+    coords: &'a [T],
+    line_offsets: &'a [u32],
+}
+
+pub type MultiLineStringView2<'a, C = f64> = MultiLineStringView<'a, [C; 2]>;
+pub type MultiLineStringView3<'a, C = f64> = MultiLineStringView<'a, [C; 3]>;
+
+/// Read-only abstraction over [`MultiLineString`] and [`MultiLineStringView`].
+pub trait MultiLineStringRef<T: Coord> {
+    fn coords(&self) -> &[T];
+    fn line_offsets(&self) -> &[u32];
+
+    fn raw_coords(&self) -> &[T] {
+        let offsets = self.line_offsets();
+        match (offsets.first(), offsets.last()) {
+            (Some(&start), Some(&end)) => &self.coords()[start as usize..end as usize],
+            _ => &[],
         }
     }
-
-    pub fn from_raw(all_coords: Cow<'a, [T]>, coords_spans: Cow<'a, [u32]>) -> Self {
-        // Check if all span values are within range and monotonically increasing
-        if let Some(&last) = coords_spans.last() {
-            let len = (all_coords.len()) as u32;
-            if last >= len || coords_spans.windows(2).any(|a| a[0] >= a[1]) {
-                panic!("invalid coords_spans")
-            }
-        }
-        Self {
-            all_coords,
-            coords_spans,
-        }
+    /// Returns line vertex counts, derived as deltas of consecutive line offsets.
+    fn line_lengths(&self) -> impl Clone + ExactSizeIterator<Item = u32> + '_ {
+        self.line_offsets()
+            .windows(2)
+            .map(|window| window[1] - window[0])
     }
-
-    pub fn from_raw_unchecked(all_coords: Cow<'a, [T]>, coords_spans: Cow<'a, [u32]>) -> Self {
-        Self {
-            all_coords,
-            coords_spans,
-        }
+    fn len(&self) -> usize {
+        self.line_offsets().len().saturating_sub(1)
     }
-
-    /// Returns iterator over the linestrings.
-    pub fn iter(&self) -> Iter<T> {
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    fn iter<'a>(&'a self) -> Iter<'a, T>
+    where
+        T: 'a,
+    {
         Iter {
-            ls: self,
+            coords: self.coords(),
+            offsets: self.line_offsets(),
             pos: 0,
             end: self.len(),
         }
     }
-
-    /// Returns iterator over the linestrings in the given range.
-    pub fn iter_range(&self, range: Range<usize>) -> Iter<T> {
+    fn iter_range<'a>(&'a self, range: Range<usize>) -> Iter<'a, T>
+    where
+        T: 'a,
+    {
         Iter {
-            ls: self,
+            coords: self.coords(),
+            offsets: self.line_offsets(),
             pos: range.start,
             end: range.end,
         }
     }
+    fn get(&self, index: usize) -> Option<LineStringView<'_, T>> {
+        let offsets = self.line_offsets();
+        if index >= self.len() {
+            return None;
+        }
+        Some(LineStringView::from_raw(
+            &self.coords()[offsets[index] as usize..offsets[index + 1] as usize],
+        ))
+    }
+}
 
-    /// Returns the number of linestrings.
-    pub fn len(&self) -> usize {
-        if self.all_coords.is_empty() {
-            0
-        } else {
-            self.coords_spans.len() + 1
+impl<T: Coord> MultiLineStringRef<T> for MultiLineString<T> {
+    fn coords(&self) -> &[T] {
+        &self.coords
+    }
+    fn line_offsets(&self) -> &[u32] {
+        &self.line_offsets
+    }
+}
+
+impl<T: Coord> MultiLineStringRef<T> for MultiLineStringView<'_, T> {
+    fn coords(&self) -> &[T] {
+        self.coords
+    }
+    fn line_offsets(&self) -> &[u32] {
+        self.line_offsets
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<T> serde::Serialize for MultiLineString<T>
+where
+    T: Coord + serde::Serialize,
+{
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serialize_multi_line_string(self, serializer)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<T> serde::Serialize for MultiLineStringView<'_, T>
+where
+    T: Coord + serde::Serialize,
+{
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serialize_multi_line_string(self, serializer)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de, T> serde::Deserialize<'de> for MultiLineString<T>
+where
+    T: Coord + serde::Deserialize<'de>,
+{
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        struct MultiLineStringSerde<T> {
+            coords: Vec<T>,
+            topology: Vec<u32>,
+        }
+
+        let value = MultiLineStringSerde::deserialize(deserializer)?;
+        let line_offsets =
+            offsets_from_lengths::<D::Error>(&value.topology, value.coords.len(), "topology")?;
+        Ok(MultiLineString::from_raw_unchecked(
+            value.coords,
+            line_offsets,
+        ))
+    }
+}
+
+#[cfg(feature = "serde")]
+fn serialize_multi_line_string<T, M, S>(
+    multi_line_string: &M,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    T: Coord + serde::Serialize,
+    M: MultiLineStringRef<T> + ?Sized,
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeStruct;
+
+    let mut s = serializer.serialize_struct("MultiLineString", 2)?;
+    s.serialize_field("coords", multi_line_string.raw_coords())?;
+    s.serialize_field("topology", &OffsetLengths(multi_line_string.line_lengths()))?;
+    s.end()
+}
+
+impl<'a, T: Coord> MultiLineStringView<'a, T> {
+    pub const fn from_raw(coords: &'a [T], line_offsets: &'a [u32]) -> Self {
+        Self {
+            coords,
+            line_offsets,
         }
     }
 
-    /// Returns `true` if the MultiLineString is empty.
-    pub fn is_empty(&self) -> bool {
-        self.all_coords.is_empty()
+    /// Materializes a self-contained owned `MultiLineString` (rebases
+    /// line_offsets to 0-based and copies just this multi's coords).
+    pub fn to_owned(&self) -> MultiLineString<T> {
+        let (coords, line_offsets) = rebase_offsets(self.coords, self.line_offsets);
+        MultiLineString::from_raw_unchecked(coords, line_offsets)
+    }
+}
+
+impl<T: Coord> Default for MultiLineString<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T: Coord> MultiLineString<T> {
+    /// Creates an empty MultiLineString.
+    pub fn new() -> Self {
+        Self {
+            coords: Vec::new(),
+            line_offsets: vec![0],
+        }
+    }
+
+    pub fn from_raw(coords: Vec<T>, line_offsets: Vec<u32>) -> Self {
+        validate_offsets(coords.len(), &line_offsets, "line_offsets");
+        Self {
+            coords,
+            line_offsets,
+        }
+    }
+
+    pub fn from_raw_unchecked(coords: Vec<T>, line_offsets: Vec<u32>) -> Self {
+        Self {
+            coords,
+            line_offsets,
+        }
     }
 
     /// Removes all linestrings.
     pub fn clear(&mut self) {
-        self.all_coords.to_mut().clear();
-        self.coords_spans.to_mut().clear();
+        self.coords.clear();
+        self.line_offsets.clear();
+        self.line_offsets.push(0);
     }
 
     /// Add a linestring to the MultiLineString.
     pub fn add_linestring<I: IntoIterator<Item = T>>(&mut self, iter: I) {
-        if !self.all_coords.is_empty() {
-            self.coords_spans
-                .to_mut()
-                .push((self.all_coords.len()) as u32);
-        }
-        self.all_coords.to_mut().extend(iter);
+        self.coords.extend(iter);
+        self.line_offsets.push(self.coords.len() as u32);
     }
 
     /// Create a new MultiLineString by applying the given transformation to all coordinates.
     pub fn transform<T2: Coord>(&self, f: impl Fn(&T) -> T2) -> MultiLineString<T2> {
         MultiLineString {
-            all_coords: self.all_coords.iter().map(f).collect(),
-            coords_spans: self.coords_spans.clone(),
+            coords: self.coords.iter().map(f).collect(),
+            line_offsets: self.line_offsets.clone(),
         }
     }
 
     /// Applies the given transformation to all coordinates in the MultiLineString.
     pub fn transform_inplace(&mut self, mut f: impl FnMut(&T) -> T) {
-        self.all_coords.to_mut().iter_mut().for_each(|c| {
+        self.coords.iter_mut().for_each(|c| {
             *c = f(c);
         });
     }
 }
 
-impl<'a, T: Coord> IntoIterator for &'a MultiLineString<'_, T> {
-    type Item = LineString<'a, T>;
+impl<'a, T: Coord> IntoIterator for &'a MultiLineString<T> {
+    type Item = LineStringView<'a, T>;
     type IntoIter = Iter<'a, T>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.iter()
+        <MultiLineString<T> as MultiLineStringRef<T>>::iter(self)
+    }
+}
+
+impl<'a, T: Coord> IntoIterator for &MultiLineStringView<'a, T> {
+    type Item = LineStringView<'a, T>;
+    type IntoIter = Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        Iter {
+            coords: self.coords,
+            offsets: self.line_offsets,
+            pos: 0,
+            end: self.line_offsets.len().saturating_sub(1),
+        }
     }
 }
 
 pub struct Iter<'a, T: Coord> {
-    ls: &'a MultiLineString<'a, T>,
+    coords: &'a [T],
+    offsets: &'a [u32],
     pos: usize,
     end: usize,
 }
 
 impl<'a, T: Coord> Iterator for Iter<'a, T> {
-    type Item = LineString<'a, T>;
+    type Item = LineStringView<'a, T>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.ls.is_empty() {
-            return None;
-        }
         if self.pos < self.end {
-            let start = match self.pos {
-                0 => 0,
-                _ => self.ls.coords_spans[self.pos - 1] as usize,
-            };
-            let end = if self.pos < self.ls.coords_spans.len() {
-                self.ls.coords_spans[self.pos] as usize
-            } else {
-                self.ls.all_coords.len()
-            };
-            let coords = &self.ls.all_coords[start..end];
+            let start = self.offsets[self.pos] as usize;
+            let end = self.offsets[self.pos + 1] as usize;
             self.pos += 1;
-            Some(LineString::from_raw(coords.into()))
+            Some(LineStringView::from_raw(&self.coords[start..end]))
         } else {
             None
         }
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let n = self.end.saturating_sub(self.pos);
+        (n, Some(n))
+    }
 }
+
+impl<'a, T: Coord> ExactSizeIterator for Iter<'a, T> {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::geometry::linestring::LineStringRef;
     use alloc::vec;
     use alloc::vec::Vec;
 
@@ -168,9 +312,8 @@ mod tests {
         let mut mline = MultiLineString2::from_raw(
             (0..7)
                 .map(|v| [(v * 2) as f64, (v * 2 + 1) as f64])
-                .collect::<Vec<_>>()
-                .into(),
-            vec![3, 5].into(),
+                .collect::<Vec<_>>(),
+            vec![0, 3, 5, 7],
         );
         assert_eq!(mline.len(), 3);
         assert_eq!(mline.iter().count(), 3);
@@ -188,10 +331,7 @@ mod tests {
 
     #[test]
     fn test_mline_one_linestring() {
-        let mline = MultiLineString2::from_raw_unchecked(
-            Cow::Borrowed(&[[1., 2.], [3., 4.]]),
-            Cow::Borrowed(&[]),
-        );
+        let mline = MultiLineString2::from_raw_unchecked(vec![[1., 2.], [3., 4.]], vec![0, 2]);
         assert_eq!(mline.len(), 1);
         assert!(!mline.is_empty());
         for (i, _line) in mline.iter().enumerate() {
@@ -270,20 +410,18 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "invalid coords_spans")]
-    fn test_mline_invalid_coords_spans_1() {
-        let all_coords: Vec<[f64; 2]> = (0..=2).map(|i| [i as f64, i as f64]).collect();
-        let coords_spans: Vec<u32> = vec![99]; // out of `all_coords` range
-        let _polygon: MultiLineString2<f64> =
-            MultiLineString2::from_raw(all_coords.into(), coords_spans.into());
+    #[should_panic]
+    fn test_mline_invalid_line_offsets_1() {
+        let coords: Vec<[f64; 2]> = (0..=2).map(|i| [i as f64, i as f64]).collect();
+        let line_offsets: Vec<u32> = vec![0, 99]; // out of `coords` range
+        let _polygon: MultiLineString2<f64> = MultiLineString2::from_raw(coords, line_offsets);
     }
 
     #[test]
-    #[should_panic(expected = "invalid coords_spans")]
-    fn test_mline_invalid_coords_spans_2() {
-        let all_coords: Vec<[f64; 2]> = vec![];
-        let coords_spans: Vec<u32> = vec![0]; // out of `all_coords` range
-        let _polygon: MultiLineString2<f64> =
-            MultiLineString2::from_raw(all_coords.into(), coords_spans.into());
+    #[should_panic]
+    fn test_mline_invalid_line_offsets_2() {
+        let coords: Vec<[f64; 2]> = vec![];
+        let line_offsets: Vec<u32> = vec![]; // missing sentinel
+        let _polygon: MultiLineString2<f64> = MultiLineString2::from_raw(coords, line_offsets);
     }
 }
